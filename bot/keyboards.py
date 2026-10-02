@@ -55,8 +55,7 @@ def menu_kb(registered: bool, ads: list,
         ])
     else:
         rows.append([
-            btn("💾 Создать подписку", "u:reg", style="success"),
-            btn("🆘 Поддержка", "u:support"),
+            btn("💾 Создать подписку", "u:reg", style="success")
         ])
 
     # динамические разделы (конструктор из админки) — по 2 в ряд
@@ -98,7 +97,6 @@ def panel_down_kb() -> InlineKeyboardMarkup:
     return markup(
         [btn("🔄 Обновить", "u:traffic", style="primary")],
         [
-            btn("🆘 Поддержка", "u:support"),
             btn("↩️ В меню", "u:menu"),
         ],
     )
