@@ -1,0 +1,37 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === Виртуальные окружения ===
+venv/
+.venv/
+env/
+
+# === Секреты и локальный конфиг (НЕ коммитить!) ===
+.env
+creds.txt
+*.cookie
+*.session
+
+# === Логи ===
+*.log
+
+# === ОС / IDE ===
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# === Локальные данные ===
+mongodb-data/
+data/
+*.db
+*.sqlite3
+

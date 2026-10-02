@@ -1,0 +1,1541 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>NTTunnel — VK TURN Proxy</title>
+    <meta name="description"
+          content="NTTunnel — доступ к VK TURN Proxy через Telegram-бота. Подключение через медиарелейную инфраструктуру VK.">
+
+    <style>
+        :root {
+            --bg: #07080c;
+            --bg-soft: #0b0d13;
+            --card: rgba(18, 21, 30, .72);
+            --card-solid: #11141c;
+            --text: #f4f6fb;
+            --muted: #8c93a5;
+            --line: rgba(255,255,255,.08);
+
+            --accent: #6878ff;
+            --accent-2: #9b72ff;
+            --accent-soft: rgba(104,120,255,.14);
+
+            --green: #55d69a;
+            --danger: #ff667d;
+
+            --radius: 24px;
+            --container: 1180px;
+        }
+
+        [data-theme="light"] {
+            --bg: #f5f6fa;
+            --bg-soft: #ffffff;
+            --card: rgba(255,255,255,.78);
+            --card-solid: #ffffff;
+            --text: #10131a;
+            --muted: #687080;
+            --line: rgba(0,0,0,.08);
+            --accent: #5365f4;
+            --accent-2: #815ce8;
+            --accent-soft: rgba(83,101,244,.1);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            min-height: 100vh;
+            background:
+                radial-gradient(circle at 50% -10%, rgba(104,120,255,.12), transparent 35%),
+                var(--bg);
+            color: var(--text);
+            font-family:
+                Inter,
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                sans-serif;
+            line-height: 1.6;
+            overflow-x: hidden;
+            transition: background .25s, color .25s;
+        }
+
+        a {
+            color: inherit;
+            text-decoration: none;
+        }
+
+        button {
+            font: inherit;
+        }
+
+        .container {
+            width: min(calc(100% - 40px), var(--container));
+            margin: auto;
+        }
+
+        /* ---------------- HEADER ---------------- */
+
+        header {
+            position: fixed;
+            z-index: 100;
+            top: 0;
+            left: 0;
+            width: 100%;
+            padding: 16px 0;
+            transition: .25s;
+        }
+
+        header.scrolled {
+            background: rgba(7,8,12,.72);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--line);
+        }
+
+        [data-theme="light"] header.scrolled {
+            background: rgba(245,246,250,.78);
+        }
+
+        .nav {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 54px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            font-weight: 800;
+            letter-spacing: -.04em;
+        }
+
+        .logo-mark {
+            width: 36px;
+            height: 36px;
+            display: grid;
+            place-items: center;
+            border-radius: 11px;
+            background:
+                linear-gradient(145deg, #fff, #dce0ff);
+            color: #080910;
+            font-weight: 950;
+            font-size: 17px;
+            box-shadow: 0 8px 30px rgba(104,120,255,.2);
+        }
+
+        .logo span {
+            color: var(--muted);
+            font-weight: 600;
+        }
+
+        nav {
+            display: flex;
+            align-items: center;
+            gap: 30px;
+        }
+
+        nav a {
+            color: var(--muted);
+            font-size: 14px;
+            transition: color .2s;
+        }
+
+        nav a:hover {
+            color: var(--text);
+        }
+
+        .nav-actions {
+            display: flex;
+            gap: 9px;
+            align-items: center;
+        }
+
+        .icon-btn {
+            width: 40px;
+            height: 40px;
+            border: 1px solid var(--line);
+            background: var(--card);
+            color: var(--text);
+            border-radius: 12px;
+            cursor: pointer;
+            backdrop-filter: blur(15px);
+        }
+
+        .mobile-menu {
+            display: none;
+        }
+
+        /* ---------------- BUTTONS ---------------- */
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 9px;
+            min-height: 46px;
+            padding: 0 19px;
+            border-radius: 13px;
+            border: 1px solid transparent;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            transition:
+                transform .2s,
+                box-shadow .2s,
+                background .2s;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            color: #fff;
+            box-shadow: 0 10px 35px rgba(104,120,255,.2);
+        }
+
+        .btn-primary:hover {
+            box-shadow: 0 15px 45px rgba(104,120,255,.3);
+        }
+
+        .btn-secondary {
+            background: var(--card);
+            border-color: var(--line);
+            color: var(--text);
+            backdrop-filter: blur(15px);
+        }
+
+        /* ---------------- HERO ---------------- */
+
+        .hero {
+            min-height: 800px;
+            padding: 180px 0 100px;
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        .hero-grid {
+            position: absolute;
+            inset: 0;
+            opacity: .25;
+            pointer-events: none;
+            background-image:
+                linear-gradient(var(--line) 1px, transparent 1px),
+                linear-gradient(90deg, var(--line) 1px, transparent 1px);
+            background-size: 70px 70px;
+            mask-image: linear-gradient(to bottom, black, transparent 80%);
+        }
+
+        .hero-glow {
+            position: absolute;
+            width: 600px;
+            height: 600px;
+            border-radius: 50%;
+            left: 50%;
+            top: 30%;
+            transform: translate(-50%, -50%);
+            background: rgba(104,120,255,.09);
+            filter: blur(100px);
+            pointer-events: none;
+        }
+
+        .hero-content {
+            position: relative;
+            text-align: center;
+            max-width: 850px;
+            margin: auto;
+        }
+
+        .eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 9px;
+            padding: 7px 12px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: rgba(255,255,255,.025);
+            color: var(--muted);
+            font-size: 12px;
+            margin-bottom: 25px;
+            backdrop-filter: blur(15px);
+        }
+
+        .status-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--green);
+            box-shadow: 0 0 14px var(--green);
+        }
+
+        h1 {
+            font-size: clamp(48px, 8vw, 92px);
+            line-height: .96;
+            letter-spacing: -.065em;
+            font-weight: 850;
+        }
+
+        h1 .gradient {
+            background: linear-gradient(100deg, #fff 20%, #8794ff 60%, #ad82ff);
+            -webkit-background-clip: text;
+            color: transparent;
+        }
+
+        .hero-description {
+            max-width: 650px;
+            margin: 27px auto 34px;
+            color: var(--muted);
+            font-size: 18px;
+        }
+
+        .hero-actions {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .hero-note {
+            margin-top: 19px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        /* ---------------- FLOW ---------------- */
+
+        .flow {
+            margin-top: 70px;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+        }
+
+        .flow-card {
+            position: relative;
+            padding: 23px;
+            text-align: left;
+            border: 1px solid var(--line);
+            border-radius: 19px;
+            background: rgba(255,255,255,.025);
+        }
+
+        .flow-number {
+            color: var(--accent);
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: .15em;
+            text-transform: uppercase;
+            margin-bottom: 12px;
+        }
+
+        .flow-card strong {
+            display: block;
+            font-size: 15px;
+            margin-bottom: 5px;
+        }
+
+        .flow-card p {
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        /* ---------------- SECTIONS ---------------- */
+
+        section {
+            padding: 110px 0;
+        }
+
+        .section-head {
+            max-width: 680px;
+            margin-bottom: 48px;
+        }
+
+        .section-label {
+            color: var(--accent);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: .18em;
+            font-weight: 800;
+            margin-bottom: 12px;
+        }
+
+        h2 {
+            font-size: clamp(34px, 5vw, 57px);
+            line-height: 1.03;
+            letter-spacing: -.05em;
+            margin-bottom: 17px;
+        }
+
+        .section-head p {
+            color: var(--muted);
+            font-size: 16px;
+        }
+
+        /* ---------------- WHAT IS TURN ---------------- */
+
+        .turn-layout {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            align-items: stretch;
+        }
+
+        .big-card {
+            min-height: 430px;
+            padding: 36px;
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            background:
+                radial-gradient(circle at 80% 15%, rgba(104,120,255,.12), transparent 35%),
+                var(--card);
+            backdrop-filter: blur(20px);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .big-card h3 {
+            font-size: 27px;
+            letter-spacing: -.035em;
+            margin-bottom: 15px;
+        }
+
+        .big-card p {
+            color: var(--muted);
+            font-size: 15px;
+            max-width: 480px;
+        }
+
+        .network {
+            position: absolute;
+            bottom: 25px;
+            left: 30px;
+            right: 30px;
+            height: 150px;
+        }
+
+        .network-line {
+            position: absolute;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--accent), transparent);
+            opacity: .7;
+            transform-origin: left;
+        }
+
+        .line-1 {
+            width: 80%;
+            left: 10%;
+            top: 50%;
+            transform: rotate(-14deg);
+        }
+
+        .line-2 {
+            width: 65%;
+            left: 17%;
+            top: 55%;
+            transform: rotate(14deg);
+        }
+
+        .line-3 {
+            width: 55%;
+            left: 23%;
+            top: 50%;
+        }
+
+        .node {
+            position: absolute;
+            width: 13px;
+            height: 13px;
+            border-radius: 50%;
+            background: var(--accent);
+            box-shadow: 0 0 25px var(--accent);
+        }
+
+        .node:nth-child(4) {
+            left: 5%;
+            top: 45%;
+        }
+
+        .node:nth-child(5) {
+            left: 45%;
+            top: 43%;
+        }
+
+        .node:nth-child(6) {
+            right: 6%;
+            top: 45%;
+        }
+
+        .turn-points {
+            display: grid;
+            gap: 10px;
+        }
+
+        .point {
+            padding: 27px;
+            border: 1px solid var(--line);
+            border-radius: 20px;
+            background: var(--card);
+        }
+
+        .point-icon {
+            width: 39px;
+            height: 39px;
+            display: grid;
+            place-items: center;
+            border-radius: 12px;
+            background: var(--accent-soft);
+            color: #8d9aff;
+            margin-bottom: 16px;
+        }
+
+        .point h3 {
+            font-size: 17px;
+            margin-bottom: 6px;
+        }
+
+        .point p {
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        /* ---------------- HOW IT WORKS ---------------- */
+
+        .steps {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+        }
+
+        .step {
+            min-height: 240px;
+            padding: 26px;
+            border: 1px solid var(--line);
+            border-radius: 20px;
+            background: var(--card);
+            position: relative;
+        }
+
+        .step-number {
+            font-size: 40px;
+            font-weight: 800;
+            letter-spacing: -.06em;
+            color: rgba(255,255,255,.1);
+            margin-bottom: 35px;
+        }
+
+        [data-theme="light"] .step-number {
+            color: rgba(0,0,0,.08);
+        }
+
+        .step h3 {
+            font-size: 17px;
+            margin-bottom: 8px;
+        }
+
+        .step p {
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        /* ---------------- BOT ---------------- */
+
+        .bot-section {
+            position: relative;
+        }
+
+        .bot-card {
+            border: 1px solid var(--line);
+            border-radius: 30px;
+            padding: 55px;
+            background:
+                radial-gradient(circle at 80% 0%, rgba(155,114,255,.12), transparent 35%),
+                radial-gradient(circle at 0% 100%, rgba(104,120,255,.08), transparent 35%),
+                var(--card);
+            display: grid;
+            grid-template-columns: 1.1fr .9fr;
+            gap: 60px;
+            overflow: hidden;
+        }
+
+        .bot-card h2 {
+            margin-bottom: 15px;
+        }
+
+        .bot-card > div > p {
+            color: var(--muted);
+            max-width: 580px;
+        }
+
+        .features {
+            display: grid;
+            gap: 10px;
+        }
+
+        .feature {
+            padding: 17px 18px;
+            border: 1px solid var(--line);
+            border-radius: 15px;
+            background: rgba(255,255,255,.025);
+        }
+
+        .feature strong {
+            display: block;
+            font-size: 14px;
+            margin-bottom: 3px;
+        }
+
+        .feature span {
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        /* ---------------- CONFIG ---------------- */
+
+        .config {
+            margin-top: 50px;
+            display: grid;
+            grid-template-columns: .8fr 1.2fr;
+            gap: 15px;
+        }
+
+        .config-info,
+        .terminal {
+            border: 1px solid var(--line);
+            border-radius: 22px;
+            background: var(--card);
+        }
+
+        .config-info {
+            padding: 30px;
+        }
+
+        .config-info h3 {
+            font-size: 21px;
+            margin-bottom: 10px;
+        }
+
+        .config-info p {
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .config-list {
+            margin-top: 25px;
+            display: grid;
+            gap: 10px;
+        }
+
+        .config-list div {
+            display: flex;
+            justify-content: space-between;
+            padding: 11px 0;
+            border-bottom: 1px solid var(--line);
+            font-size: 13px;
+        }
+
+        .config-list span {
+            color: var(--muted);
+        }
+
+        .terminal {
+            padding: 25px;
+            overflow: hidden;
+        }
+
+        .terminal-head {
+            display: flex;
+            gap: 7px;
+            margin-bottom: 20px;
+        }
+
+        .terminal-head i {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--muted);
+            opacity: .5;
+        }
+
+        pre {
+            color: #aab4ff;
+            font-size: 13px;
+            line-height: 1.8;
+            overflow-x: auto;
+        }
+
+        .terminal-comment {
+            color: #626a7e;
+        }
+
+        /* ---------------- FAQ ---------------- */
+
+        .faq {
+            max-width: 850px;
+        }
+
+        details {
+            border-top: 1px solid var(--line);
+            padding: 21px 0;
+        }
+
+        details:last-child {
+            border-bottom: 1px solid var(--line);
+        }
+
+        summary {
+            cursor: pointer;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-weight: 650;
+            font-size: 15px;
+        }
+
+        summary::-webkit-details-marker {
+            display: none;
+        }
+
+        summary::after {
+            content: "+";
+            color: var(--muted);
+            font-size: 21px;
+            font-weight: 300;
+        }
+
+        details[open] summary::after {
+            content: "−";
+        }
+
+        details p {
+            color: var(--muted);
+            font-size: 14px;
+            max-width: 700px;
+            padding-top: 13px;
+        }
+
+        /* ---------------- CTA ---------------- */
+
+        .cta {
+            padding-top: 50px;
+        }
+
+        .cta-card {
+            text-align: center;
+            padding: 80px 30px;
+            border-radius: 30px;
+            border: 1px solid var(--line);
+            background:
+                radial-gradient(circle at 50% 0%, rgba(104,120,255,.17), transparent 50%),
+                var(--card);
+        }
+
+        .cta-card h2 {
+            max-width: 650px;
+            margin: 0 auto 17px;
+        }
+
+        .cta-card p {
+            max-width: 550px;
+            margin: 0 auto 27px;
+            color: var(--muted);
+        }
+
+        /* ---------------- FOOTER ---------------- */
+
+        footer {
+            padding: 35px 0;
+            border-top: 1px solid var(--line);
+        }
+
+        .footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .footer-links {
+            display: flex;
+            gap: 20px;
+        }
+
+        .footer-links a:hover {
+            color: var(--text);
+        }
+
+        /* ---------------- REVEAL ---------------- */
+
+        .reveal {
+            opacity: 0;
+            transform: translateY(20px);
+            transition:
+                opacity .7s ease,
+                transform .7s ease;
+        }
+
+        .reveal.visible {
+            opacity: 1;
+            transform: none;
+        }
+
+        /* ---------------- MOBILE ---------------- */
+
+        @media (max-width: 850px) {
+            nav {
+                display: none;
+            }
+
+            .mobile-menu {
+                display: block;
+            }
+
+            .hero {
+                min-height: 730px;
+                padding-top: 145px;
+            }
+
+            .flow,
+            .steps {
+                grid-template-columns: 1fr 1fr;
+            }
+
+            .turn-layout,
+            .bot-card,
+            .config {
+                grid-template-columns: 1fr;
+            }
+
+            .bot-card {
+                padding: 30px;
+                gap: 30px;
+            }
+        }
+
+        @media (max-width: 560px) {
+            .container {
+                width: min(calc(100% - 28px), var(--container));
+            }
+
+            section {
+                padding: 75px 0;
+            }
+
+            h1 {
+                font-size: 49px;
+            }
+
+            .hero-description {
+                font-size: 15px;
+            }
+
+            .hero-actions {
+                flex-direction: column;
+            }
+
+            .hero-actions .btn {
+                width: 100%;
+            }
+
+            .flow,
+            .steps {
+                grid-template-columns: 1fr;
+            }
+
+            .big-card {
+                min-height: 370px;
+                padding: 27px;
+            }
+
+            .bot-card {
+                padding: 25px;
+                border-radius: 23px;
+            }
+
+            .cta-card {
+                padding: 55px 22px;
+            }
+
+            .footer {
+                flex-direction: column;
+                gap: 15px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<header id="header">
+    <div class="container nav">
+
+        <a href="#" class="logo">
+            <div class="logo-mark">NT</div>
+            <div>NTTunnel <span>/ NotAProjects</span></div>
+        </a>
+
+        <nav>
+            <a href="#turn">VK TURN</a>
+            <a href="#how">Как работает</a>
+            <a href="#bot">Бот</a>
+            <a href="#faq">FAQ</a>
+        </nav>
+
+        <div class="nav-actions">
+            <button class="icon-btn" id="themeBtn" aria-label="Сменить тему">
+                ◐
+            </button>
+
+            <a href="https://t.me/YOUR_BOT_USERNAME"
+               class="btn btn-primary"
+               target="_blank">
+                Открыть бота
+            </a>
+        </div>
+    </div>
+</header>
+
+
+<main>
+
+    <!-- HERO -->
+
+    <section class="hero">
+        <div class="hero-grid"></div>
+        <div class="hero-glow"></div>
+
+        <div class="container">
+            <div class="hero-content reveal">
+
+                <div class="eyebrow">
+                    <span class="status-dot"></span>
+                    NTTunnel · VK TURN Proxy
+                </div>
+
+                <h1>
+                    Интернет через
+                    <span class="gradient">медиарелей VK</span>
+                </h1>
+
+                <p class="hero-description">
+                    NTTunnel предоставляет доступ к VPN через инфраструктуру
+                    медиарелеев VK. Получение конфигурации происходит через
+                    Telegram-бота — без ручной настройки серверов.
+                </p>
+
+                <div class="hero-actions">
+                    <a href="https://t.me/YOUR_BOT_USERNAME"
+                       class="btn btn-primary"
+                       target="_blank">
+                        Получить подключение →
+                    </a>
+
+                    <a href="#turn" class="btn btn-secondary">
+                        Что такое VK TURN?
+                    </a>
+                </div>
+
+                <div class="hero-note">
+                    Бессрочная подписка · до 4 VK-хешей · управление через Telegram
+                </div>
+            </div>
+
+            <div class="flow reveal">
+
+                <div class="flow-card">
+                    <div class="flow-number">01 / Получение</div>
+                    <strong>Открываете бота</strong>
+                    <p>
+                        Проходите короткую регистрацию и выбираете приложение.
+                    </p>
+                </div>
+
+                <div class="flow-card">
+                    <div class="flow-number">02 / Подключение</div>
+                    <strong>Добавляете VK-хеши</strong>
+                    <p>
+                        До четырёх ссылок на звонки VK используются для подключения.
+                    </p>
+                </div>
+
+                <div class="flow-card">
+                    <div class="flow-number">03 / Готово</div>
+                    <strong>Получаете конфигурацию</strong>
+                    <p>
+                        Бот выдаёт персональную ссылку WDTT для приложения.
+                    </p>
+                </div>
+
+            </div>
+        </div>
+    </section>
+
+
+    <!-- WHAT IS TURN -->
+
+    <section id="turn">
+        <div class="container">
+
+            <div class="section-head reveal">
+                <div class="section-label">01 · Технология</div>
+
+                <h2>
+                    Что такое
+                    <span class="gradient">VK TURN Proxy?</span>
+                </h2>
+
+                <p>
+                    TURN — технология передачи медиатрафика через промежуточный
+                    сервер, когда прямое соединение между участниками невозможно.
+                    NTTunnel использует эту модель для построения VPN-соединения
+                    через медиарелейную инфраструктуру VK.
+                </p>
+            </div>
+
+
+            <div class="turn-layout">
+
+                <div class="big-card reveal">
+                    <h3>Не обычный VPN-сервер</h3>
+
+                    <p>
+                        В классической схеме клиент подключается непосредственно
+                        к VPN-серверу. Здесь транспорт строится через медиарелейную
+                        инфраструктуру, используемую для передачи трафика.
+                    </p>
+
+                    <div class="network">
+                        <div class="network-line line-1"></div>
+                        <div class="network-line line-2"></div>
+                        <div class="network-line line-3"></div>
+
+                        <div class="node"></div>
+                        <div class="node"></div>
+                        <div class="node"></div>
+                    </div>
+                </div>
+
+
+                <div class="turn-points">
+
+                    <div class="point reveal">
+                        <div class="point-icon">↗</div>
+                        <h3>Альтернативный транспорт</h3>
+                        <p>
+                            Соединение использует не только привычный сценарий
+                            прямого подключения к VPN-серверу.
+                        </p>
+                    </div>
+
+                    <div class="point reveal">
+                        <div class="point-icon">⌁</div>
+                        <h3>Медиарелей</h3>
+                        <p>
+                            TURN-релей выступает промежуточной точкой передачи
+                            данных между клиентом и конечной инфраструктурой.
+                        </p>
+                    </div>
+
+                    <div class="point reveal">
+                        <div class="point-icon">◇</div>
+                        <h3>WDTT</h3>
+                        <p>
+                            NTTunnel выдаёт конфигурацию в формате
+                            <code>wdtt://</code>, которую использует совместимое
+                            приложение.
+                        </p>
+                    </div>
+
+                </div>
+
+            </div>
+        </div>
+    </section>
+
+
+    <!-- HOW -->
+
+    <section id="how">
+        <div class="container">
+
+            <div class="section-head reveal">
+                <div class="section-label">02 · Подключение</div>
+
+                <h2>
+                    От Telegram
+                    <span class="gradient">до подключения.</span>
+                </h2>
+
+                <p>
+                    Всё необходимое пользователю находится внутри одного бота.
+                    Не нужно вручную создавать конфигурации или разбираться
+                    с параметрами сервера.
+                </p>
+            </div>
+
+
+            <div class="steps">
+
+                <div class="step reveal">
+                    <div class="step-number">01</div>
+                    <h3>Выберите приложение</h3>
+                    <p>
+                        WDTT или qWDTT — бот покажет доступные варианты
+                        и условия использования.
+                    </p>
+                </div>
+
+                <div class="step reveal">
+                    <div class="step-number">02</div>
+                    <h3>Добавьте VK-хеши</h3>
+                    <p>
+                        Отправьте боту до четырёх ссылок вида
+                        vk.com/call/join/...
+                    </p>
+                </div>
+
+                <div class="step reveal">
+                    <div class="step-number">03</div>
+                    <h3>Получите ключ</h3>
+                    <p>
+                        После регистрации бот сформирует персональную
+                        WDTT-ссылку для подключения.
+                    </p>
+                </div>
+
+                <div class="step reveal">
+                    <div class="step-number">04</div>
+                    <h3>Следите за трафиком</h3>
+                    <p>
+                        В разделе «Мой конфиг» отображаются текущий
+                        трафик и параметры подключения.
+                    </p>
+                </div>
+
+            </div>
+        </div>
+    </section>
+
+
+    <!-- BOT -->
+
+    <section id="bot" class="bot-section">
+        <div class="container">
+
+            <div class="bot-card reveal">
+
+                <div>
+                    <div class="section-label">03 · NTTunnel Bot</div>
+
+                    <h2>
+                        Один бот.
+                        <span class="gradient">Всё управление.</span>
+                    </h2>
+
+                    <p>
+                        NTTunnel Bot — точка входа в сервис. Он создаёт
+                        персональную конфигурацию, показывает состояние
+                        подключения и позволяет управлять доступом без
+                        отдельной панели.
+                    </p>
+
+                    <div style="margin-top:25px">
+                        <a href="https://t.me/YOUR_BOT_USERNAME"
+                           target="_blank"
+                           class="btn btn-primary">
+                            Открыть NTTunnel Bot →
+                        </a>
+                    </div>
+                </div>
+
+
+                <div class="features">
+
+                    <div class="feature">
+                        <strong>Персональная конфигурация</strong>
+                        <span>
+                            Уникальный ключ WDTT для вашего подключения.
+                        </span>
+                    </div>
+
+                    <div class="feature">
+                        <strong>До 4 VK-хешей</strong>
+                        <span>
+                            Можно добавить несколько доступных точек VK.
+                        </span>
+                    </div>
+
+                    <div class="feature">
+                        <strong>Бессрочный доступ</strong>
+                        <span>
+                            Подписка не имеет фиксированной даты окончания.
+                        </span>
+                    </div>
+
+                    <div class="feature">
+                        <strong>Трафик в реальном времени</strong>
+                        <span>
+                            Данные о трафике синхронизируются с панелью.
+                        </span>
+                    </div>
+
+                    <div class="feature">
+                        <strong>Реферальная система</strong>
+                        <span>
+                            За приглашённого пользователя начисляется +5 ГБ.
+                        </span>
+                    </div>
+
+                </div>
+
+            </div>
+
+
+            <div class="config">
+
+                <div class="config-info reveal">
+
+                    <h3>Что находится в конфигурации?</h3>
+
+                    <p>
+                        После завершения регистрации бот показывает основные
+                        параметры вашего подключения.
+                    </p>
+
+                    <div class="config-list">
+                        <div>
+                            <span>Тип</span>
+                            <b>WDTT</b>
+                        </div>
+
+                        <div>
+                            <span>Доступ</span>
+                            <b>Бессрочный</b>
+                        </div>
+
+                        <div>
+                            <span>VK-хеши</span>
+                            <b>до 4</b>
+                        </div>
+
+                        <div>
+                            <span>Трафик</span>
+                            <b>онлайн</b>
+                        </div>
+                    </div>
+
+                </div>
+
+
+                <div class="terminal reveal">
+
+                    <div class="terminal-head">
+                        <i></i>
+                        <i></i>
+                        <i></i>
+                    </div>
+
+                    <pre><span class="terminal-comment">// персональная конфигурация</span>
+
+protocol: <span>wdtt://</span>
+status:   <span>connected</span>
+access:   <span>unlimited</span>
+
+<span class="terminal-comment">// VK TURN</span>
+relays:   <span>available</span>
+traffic:  <span>live</span>
+devices:  <span>managed by bot</span></pre>
+
+                </div>
+
+            </div>
+
+        </div>
+    </section>
+
+
+    <!-- WHY -->
+
+    <section>
+        <div class="container">
+
+            <div class="section-head reveal">
+                <div class="section-label">04 · NTTunnel</div>
+
+                <h2>
+                    Никаких
+                    <span class="gradient">лишних действий.</span>
+                </h2>
+
+                <p>
+                    Сервис сделан вокруг одного сценария:
+                    получить доступ, подключиться и забыть о технической части.
+                </p>
+            </div>
+
+
+            <div class="steps">
+
+                <div class="step reveal">
+                    <div class="step-number">A</div>
+                    <h3>Без ручного конфига</h3>
+                    <p>
+                        Бот сам формирует ссылку подключения на основе
+                        введённых данных.
+                    </p>
+                </div>
+
+                <div class="step reveal">
+                    <div class="step-number">B</div>
+                    <h3>Без личного кабинета</h3>
+                    <p>
+                        Основные действия находятся непосредственно
+                        в Telegram.
+                    </p>
+                </div>
+
+                <div class="step reveal">
+                    <div class="step-number">C</div>
+                    <h3>Без срока окончания</h3>
+                    <p>
+                        Подписка создаётся как бессрочная,
+                        пока доступ не будет отключён.
+                    </p>
+                </div>
+
+                <div class="step reveal">
+                    <div class="step-number">D</div>
+                    <h3>Контроль трафика</h3>
+                    <p>
+                        Использование и состояние подключения можно
+                        посмотреть прямо в боте.
+                    </p>
+                </div>
+
+            </div>
+
+        </div>
+    </section>
+
+
+    <!-- FAQ -->
+
+    <section id="faq">
+        <div class="container">
+
+            <div class="section-head reveal">
+                <div class="section-label">05 · FAQ</div>
+
+                <h2>
+                    Остались
+                    <span class="gradient">вопросы?</span>
+                </h2>
+
+                <p>
+                    Основные вещи, которые стоит знать перед подключением.
+                </p>
+            </div>
+
+
+            <div class="faq">
+
+                <details class="reveal">
+                    <summary>Что такое VK TURN?</summary>
+
+                    <p>
+                        TURN — механизм ретрансляции сетевого трафика через
+                        промежуточный сервер. NTTunnel использует медиарелейную
+                        инфраструктуру VK как часть транспортной схемы.
+                    </p>
+                </details>
+
+
+                <details class="reveal">
+                    <summary>Это обычный VPN?</summary>
+
+                    <p>
+                        По назначению — да, NTTunnel предоставляет защищённое
+                        VPN-подключение. Но транспортная схема отличается
+                        от классического варианта, где клиент напрямую
+                        подключается к обычному VPN-серверу.
+                    </p>
+                </details>
+
+
+                <details class="reveal">
+                    <summary>Что такое VK-хеш?</summary>
+
+                    <p>
+                        Это идентификатор, который можно получить из ссылки
+                        на VK-звонок вида vk.com/call/join/.... Он используется
+                        NTTunnel для настройки подключения через соответствующую
+                        медиарелейную инфраструктуру.
+                    </p>
+                </details>
+
+
+                <details class="reveal">
+                    <summary>Сколько VK-хешей можно добавить?</summary>
+
+                    <p>
+                        До четырёх VK-хешей на одну конфигурацию.
+                    </p>
+                </details>
+
+
+                <details class="reveal">
+                    <summary>Нужно ли каждый месяц продлевать доступ?</summary>
+
+                    <p>
+                        Нет. Подписка NTTunnel создаётся бессрочной.
+                        При этом применяемый лимит трафика может автоматически
+                        сбрасываться через заданный период.
+                    </p>
+                </details>
+
+
+                <details class="reveal">
+                    <summary>Где получить конфигурацию?</summary>
+
+                    <p>
+                        Через официальный Telegram-бот NTTunnel.
+                        После регистрации бот выдаёт персональную ссылку
+                        формата wdtt://.
+                    </p>
+                </details>
+
+
+                <details class="reveal">
+                    <summary>Какие приложения поддерживаются?</summary>
+
+                    <p>
+                        В процессе регистрации бот позволяет выбрать
+                        WDTT или qWDTT — в зависимости от доступных
+                        вариантов подключения.
+                    </p>
+                </details>
+
+            </div>
+
+        </div>
+    </section>
+
+
+    <!-- CTA -->
+
+    <section class="cta">
+        <div class="container">
+
+            <div class="cta-card reveal">
+
+                <div class="section-label">NTTunnel</div>
+
+                <h2>
+                    Готовы попробовать
+                    <span class="gradient">другой транспорт?</span>
+                </h2>
+
+                <p>
+                    Откройте Telegram-бота, пройдите несколько шагов
+                    и получите персональную конфигурацию.
+                </p>
+
+                <a href="https://t.me/YOUR_BOT_USERNAME"
+                   target="_blank"
+                   class="btn btn-primary">
+                    Запустить NTTunnel Bot →
+                </a>
+
+            </div>
+
+        </div>
+    </section>
+
+</main>
+
+
+<footer>
+    <div class="container footer">
+
+        <div>
+            © 2026 NTTunnel · проект NotAProjects
+        </div>
+
+        <div class="footer-links">
+            <a href="#turn">Технология</a>
+            <a href="#bot">Бот</a>
+            <a href="#faq">FAQ</a>
+        </div>
+
+    </div>
+</footer>
+
+
+<script>
+    /* ---------------- THEME ---------------- */
+
+    const themeBtn = document.getElementById("themeBtn");
+
+    const savedTheme = localStorage.getItem("nttunnel-theme");
+
+    if (savedTheme) {
+        document.documentElement.dataset.theme = savedTheme;
+    }
+
+    themeBtn.addEventListener("click", () => {
+        const current =
+            document.documentElement.dataset.theme === "light"
+                ? "dark"
+                : "light";
+
+        document.documentElement.dataset.theme = current;
+        localStorage.setItem("nttunnel-theme", current);
+    });
+
+
+    /* ---------------- HEADER ---------------- */
+
+    const header = document.getElementById("header");
+
+    window.addEventListener("scroll", () => {
+        header.classList.toggle("scrolled", window.scrollY > 20);
+    });
+
+
+    /* ---------------- REVEAL ---------------- */
+
+    const observer = new IntersectionObserver(
+        entries => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add("visible");
+                    observer.unobserve(entry.target);
+                }
+            });
+        },
+        {
+            threshold: .12
+        }
+    );
+
+    document.querySelectorAll(".reveal").forEach(el => {
+        observer.observe(el);
+    });
+</script>
+
+</body>
+</html>
