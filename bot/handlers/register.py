@@ -18,11 +18,13 @@ from ..context import app
 from ..db import utcnow
 from ..keyboards import (
     agreement_kb,
+    config_missing_kb,
     done_kb,
     hash_added_kb,
     hash_help_kb,
     hash_prompt_kb,
     no_config_kb,
+    panel_down_kb,
     show_link_kb,
     step_app_kb,
     config_kb,
@@ -32,16 +34,19 @@ from ..texts import (
     AGREEMENT_HEAD,
     HASH_HELP,
     STEP_APP,
+    config_missing_text,
     config_text,
     done_text,
     hash_added_text,
     hash_intro,
     no_config_text,
     no_slots_text,
+    panel_down_text,
     sub_text,
     wdtt_configs,
 )
 from ..utils import answer_or_alert, extract_vk_hash, safe_edit
+from ..wdtt import WdttError
 
 
 log = logging.getLogger(__name__)
@@ -88,6 +93,58 @@ async def _show_no_config(cb: CallbackQuery):
     await answer_or_alert(cb)
 
 
+async def _resolve_live(user: dict):
+    """Ищет конфиг пользователя в панели.
+
+    Возвращает ``(live|None, reason)``:
+      • ``'ok'``         — конфиг найден;
+      • ``'panel_down'`` — панель недоступна (это НЕ «нет конфига»);
+      • ``'missing'``    — панель отвечает, но конфига у пользователя нет.
+
+    Сначала быстрый путь (кэш/зеркало, без запроса к панели), и только при
+    промахе — прямой **строгий** запрос, чтобы отличить сбой связи от
+    реального отсутствия конфига.
+    """
+    ctx = app()
+    tg_id = user.get("tg_id")
+    pwd = user.get("wdtt_password") or ""
+
+    if pwd:
+        live = await ctx.wdtt.find_user(pwd)
+
+        if live:
+            return live, "ok"
+
+    # Запасной ключ: панель хранит комментарий как "tg<id>" (см. регистрацию).
+    candidates = [c for c in (pwd, f"tg{tg_id}" if tg_id else "") if c]
+
+    for key in candidates:
+        try:
+            live = await ctx.wdtt.find_user(key, force=True, strict=True)
+        except WdttError:
+            return None, "panel_down"
+
+        if live:
+            return live, "ok"
+
+    return None, "missing"
+
+
+async def _show_live_problem(cb: CallbackQuery, reason: str):
+    """Корректный экран, когда конфиг не удалось получить."""
+    if not cb.message:
+        return await answer_or_alert(cb)
+
+    if reason == "panel_down":
+        await safe_edit(cb.message, panel_down_text(), panel_down_kb())
+        return await answer_or_alert(
+            cb, "🔌 Панель недоступна, попробуй позже", True)
+
+    await safe_edit(
+        cb.message, config_missing_text(), config_missing_kb())
+    return await answer_or_alert(cb, "Конфиг не найден в панели", True)
+
+
 @router.callback_query(F.data == "u:traffic")
 async def cb_traffic(cb: CallbackQuery, user: dict):
     """Трафик: зарегистрированным — конфиг + ссылки для копирования.
@@ -103,26 +160,13 @@ async def cb_traffic(cb: CallbackQuery, user: dict):
     if not user.get("registered"):
         return await _show_no_config(cb)
 
-    ctx = app()
-
     # Анимация загрузки перед запросом к серверу.
     await _edit_loading(cb, step=1)
 
-    live = await ctx.wdtt.find_user(
-        user.get("wdtt_password", "")
-    )
+    live, reason = await _resolve_live(user)
 
-    if not live:
-        await safe_edit(
-            cb.message,
-            no_config_text(),
-            no_config_kb(),
-        )
-        return await answer_or_alert(
-            cb,
-            "Подписка не найдена в панели",
-            True,
-        )
+    if live is None:
+        return await _show_live_problem(cb, reason)
 
     hashes = user.get("sub_vk_hashes") or (
         [live["vk_hash"]]
@@ -159,26 +203,13 @@ async def cb_sub(cb: CallbackQuery, user: dict):
     if not user.get("registered"):
         return await _show_no_config(cb)
 
-    ctx = app()
-
     # Анимация загрузки перед запросом к серверу.
     await _edit_loading(cb, step=2)
 
-    live = await ctx.wdtt.find_user(
-        user.get("wdtt_password", "")
-    )
+    live, reason = await _resolve_live(user)
 
-    if not live:
-        await safe_edit(
-            cb.message,
-            no_config_text(),
-            no_config_kb(),
-        )
-        return await answer_or_alert(
-            cb,
-            "Подписка не найдена в панели",
-            True,
-        )
+    if live is None:
+        return await _show_live_problem(cb, reason)
 
     hashes = user.get("sub_vk_hashes") or (
         [live["vk_hash"]]
@@ -210,11 +241,28 @@ async def cb_reg_start(
     if not cb.message:
         return await answer_or_alert(cb)
 
+    recreate = False
+
     if user.get("registered"):
-        return await answer_or_alert(
-            cb,
-            "У тебя уже есть конфиг",
-        )
+        # Пересоздание разрешаем ТОЛЬКО если в панели конфига реально нет.
+        # Иначе получался тупик: «нет конфига» ↔ «у тебя уже есть конфиг».
+        _live, reason = await _resolve_live(user)
+
+        if reason == "ok":
+            return await answer_or_alert(
+                cb,
+                "У тебя уже есть конфиг",
+            )
+
+        if reason == "panel_down":
+            return await answer_or_alert(
+                cb,
+                "🔌 Панель недоступна, попробуй позже",
+                True,
+            )
+
+        # reason == "missing" — подписки в панели нет, создаём заново.
+        recreate = True
 
     settings, ok = await _settings_and_slots()
 
@@ -237,6 +285,7 @@ async def cb_reg_start(
     await state.update_data(
         app="WDTT",
         hashes=[],
+        recreate=recreate,
     )
 
     await safe_edit(
@@ -258,15 +307,19 @@ async def cb_pick_app(
 
     chosen = cb.data.removeprefix("u:app:")
 
-    u = await app().db.get_user(
-        cb.from_user.id
-    ) or {}
+    data = await state.get_data()
 
-    if u.get("registered"):
-        return await answer_or_alert(
-            cb,
-            "У тебя уже есть конфиг",
-        )
+    # В режиме пересоздания (панель потеряла конфиг) не блокируем.
+    if not data.get("recreate"):
+        u = await app().db.get_user(
+            cb.from_user.id
+        ) or {}
+
+        if u.get("registered"):
+            return await answer_or_alert(
+                cb,
+                "У тебя уже есть конфиг",
+            )
 
     await state.update_data(app=chosen)
 

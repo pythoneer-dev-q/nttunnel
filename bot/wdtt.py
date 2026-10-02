@@ -562,6 +562,7 @@ class WdttClient:
         self,
         comment_or_password: str,
         force: bool = False,
+        strict: bool = False,
     ) -> Optional[dict]:
         """Находит пользователя по паролю/комментарию.
 
@@ -570,8 +571,9 @@ class WdttClient:
           2) персистентное зеркало в MongoDB;
           3) панель — только при ``force=True`` или холодном старте.
 
-        Панель на обычные чтения не дёргается: свежесть обеспечивает
-        фоновая синхронизация (``panel_sync_loop``).
+        ``strict=True`` — если панель недоступна, бросает ``WdttError``
+        вместо отдачи устаревшего кэша. Нужно, чтобы отличить «панель
+        лежит» от «пользователя реально нет».
         """
         if not comment_or_password:
             return None
@@ -592,6 +594,9 @@ class WdttClient:
         try:
             await self._load_users(force=force)
         except WdttError:
+            if strict:
+                raise
+
             # Панель недоступна — отдаём устаревшее зеркало/кэш, если есть.
             user = self._indexed_user(key)
 

@@ -93,6 +93,28 @@ def no_config_kb() -> InlineKeyboardMarkup:
     ])
 
 
+def panel_down_kb() -> InlineKeyboardMarkup:
+    """Панель недоступна: только обновление/выход, без создания конфига."""
+    return markup(
+        [btn("🔄 Обновить", "u:traffic", style="primary")],
+        [
+            btn("🆘 Поддержка", "u:support"),
+            btn("↩️ В меню", "u:menu"),
+        ],
+    )
+
+
+def config_missing_kb() -> InlineKeyboardMarkup:
+    """Подписка в боте есть, а в панели нет — разрешаем пересоздать."""
+    return markup(
+        [btn("♻️ Пересоздать конфиг", "u:reg", style="success")],
+        [
+            btn("🔄 Обновить", "u:traffic"),
+            btn("↩️ В меню", "u:menu"),
+        ],
+    )
+
+
 # ------------------------------------------------------ флоу регистрации
 
 def step_app_kb() -> InlineKeyboardMarkup:
