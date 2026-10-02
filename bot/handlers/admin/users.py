@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Админка: пользователи — список, профили, блокировка, лимиты, сброс трафика."""
 import logging
+import re
 
 from aiogram import F, Router
 from aiogram.filters import StateFilter
@@ -11,8 +12,7 @@ from aiogram.types import CallbackQuery, Message
 from ...context import app
 from ...keyboards import adm_back_kb
 from ...texts import esc
-from ...utils import (answer_or_alert, build_page_kb, fmt_dt,
-                      safe_edit)
+from ...utils import answer_or_alert, fmt_dt, safe_edit
 
 log = logging.getLogger(__name__)
 router = Router(name="adm-users")
@@ -22,6 +22,7 @@ PAGE_SIZE = 8
 
 class AdmUserStates(StatesGroup):
     wait_input = State()
+    search = State()
 
 
 def ua_cb(tg_id: int, act: str) -> str:
@@ -34,9 +35,37 @@ def parse_ua(data: str) -> tuple[int, str]:
     return int(tg_id_s), act
 
 
+def _users_kb(page: int, pages: int, items: list):
+    """Список пользователей: профили, поиск и пагинация."""
+    from aiogram.types import InlineKeyboardButton
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    kb = InlineKeyboardBuilder()
+    for label, cbd in items:
+        kb.button(text=label[:64], callback_data=cbd)
+    kb.button(text="🔍 Найти пользователя", callback_data="adm:usr:find")
+    kb.adjust(1)
+
+    nav: list = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            text="⬅️", callback_data=f"adm:usr:p{page - 1}"))
+    if pages > 1:
+        nav.append(InlineKeyboardButton(
+            text=f"{page + 1}/{pages}", callback_data="noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(
+            text="➡️", callback_data=f"adm:usr:p{page + 1}"))
+    if nav:
+        kb.row(*nav)
+
+    return kb.as_markup()
+
+
 @router.callback_query(F.data == "adm:usr")
 @router.callback_query(F.data.startswith("adm:usr:p"))
-async def cb_users_list(cb: CallbackQuery):
+async def cb_users_list(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
     if not cb.message:
         return await answer_or_alert(cb)
     ctx = app()
@@ -66,9 +95,96 @@ async def cb_users_list(cb: CallbackQuery):
         items.append((f"👤 {label} · {u['tg_id']}", f"adm:usr:v{u['tg_id']}"))
     text = (f"👥 <b>Пользователи</b> — всего {total}\n\n"
             + ("\n".join(lines) if lines else "Пусто."))
-    await safe_edit(cb.message, text,
-                    build_page_kb("adm:usr", page, pages, items))
+    await safe_edit(cb.message, text, _users_kb(page, pages, items))
     await answer_or_alert(cb)
+
+
+async def _search_users(query: str, limit: int = 10) -> list:
+    """Поиск пользователей через индексированные запросы.
+
+    Никакого перебора всех пользователей: сначала точные попадания по
+    уникальному/обычному индексу, затем префиксный (anchored regex) поиск
+    с жёстким лимитом.
+    """
+    ctx = app()
+    q = (query or "").strip()
+    if not q:
+        return []
+
+    # 1) числовой tg_id — уникальный индекс
+    if q.lstrip("-").isdigit():
+        u = await ctx.db.get_user(int(q))
+        return [u] if u else []
+
+    name = q.lstrip("@").strip()
+
+    # 2) точный username — индекс
+    if name:
+        u = await ctx.db.users.find_one({"username": name})
+        if u:
+            return [u]
+
+    # 3) префиксный поиск (regex с ^ — использует индекс), с лимитом
+    rx = {"$regex": "^" + re.escape(name)}
+    cursor = ctx.db.users.find(
+        {"$or": [{"username": rx}, {"full_name": rx}, {"first_name": rx}]},
+    ).sort("created_at", -1).limit(limit)
+    return [d async for d in cursor]
+
+
+@router.callback_query(F.data == "adm:usr:find")
+async def cb_users_find(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AdmUserStates.search)
+    if cb.message:
+        await safe_edit(
+            cb.message,
+            "🔍 <b>Поиск пользователя</b>\n\n"
+            "Пришлите одно из:\n"
+            "• <code>tg_id</code> (число)\n"
+            "• <code>@username</code>\n"
+            "• начало имени",
+            adm_back_kb("adm:usr"))
+    await answer_or_alert(cb, "Жду запрос ⌨️")
+
+
+@router.message(StateFilter(AdmUserStates.search), F.text)
+async def h_users_search(message: Message, state: FSMContext):
+    q = (message.text or "").strip()
+    await state.clear()
+
+    if not q or q.startswith("/"):
+        return
+
+    found = await _search_users(q, limit=10)
+
+    if not found:
+        await message.answer(
+            f"❌ Никого не найдено: <code>{esc(q)}</code>",
+            reply_markup=adm_back_kb("adm:usr"))
+        return
+
+    if len(found) == 1:
+        text, kb = await profile_text(found[0]["tg_id"])
+        await message.answer(text, reply_markup=kb)
+        return
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    kb = InlineKeyboardBuilder()
+    lines = []
+    for u in found:
+        label = (u.get("username") or u.get("full_name") or
+                 u.get("first_name") or f"id{u['tg_id']}")
+        label = str(label)[:30]
+        lines.append(f"• <b>{esc(label)}</b> · {u['tg_id']}")
+        kb.button(text=f"👤 {label} · {u['tg_id']}",
+                  callback_data=f"adm:usr:v{u['tg_id']}")
+    kb.button(text="⬅️ К списку", callback_data="adm:usr")
+    kb.adjust(1)
+
+    await message.answer(
+        f"🔍 <b>Найдено ({len(found)})</b>:\n\n" + "\n".join(lines),
+        reply_markup=kb.as_markup())
 
 
 @router.callback_query(F.data.startswith("adm:usr:v"))
