@@ -36,7 +36,7 @@ from .handlers.common import router as common_router
 from .handlers.register import router as register_router
 from .handlers.support import router as support_router
 from .middlewares.check_sub import UserGate
-from .scheduler import panel_sync_loop, run_scheduler
+from .scheduler import _panel_sync_once, panel_sync_loop, run_scheduler
 from .wdtt import WdttClient
 
 logging.basicConfig(
@@ -89,6 +89,17 @@ async def main():
         log.warning(
             "Проверка токена не удалась (сеть?): %s — polling попробует снова", e
         )
+
+    # Стартовый прогрев: один парсинг панели → in-memory + зеркало Mongo.
+    # Дальше все чтения идут локально, панель опрашивается раз в час.
+    # Апдейты до старта polling копятся в Telegram — юзеры не ждут.
+    try:
+        await asyncio.wait_for(_panel_sync_once(), timeout=90)
+        log.info("Панель: стартовое зеркало пользователей готово")
+    except Exception as e:  # noqa: BLE001 — панель может быть недоступна
+        log.warning(
+            "Стартовый sync панели не удался (%s) — читаем из прошлого "
+            "зеркала, следующая попытка через интервал sync", e)
 
     scheduler_task = asyncio.create_task(run_scheduler())
     sync_task = asyncio.create_task(panel_sync_loop())

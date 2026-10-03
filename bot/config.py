@@ -73,8 +73,9 @@ class Config:
 
     defaults_total_gb: int = 175
 
-    # Панель: интервал фоновой синхронизации зеркала пользователей (сек)
-    panel_sync_sec: int = 45
+    # Панель: интервал фоновой синхронизации зеркала пользователей (сек).
+    # Панель отдаёт список медленно (~35-40с) — по умолчанию раз в час.
+    panel_sync_sec: int = 3600
 
 
 def load_config(base_dir: str | None = None) -> Config:
@@ -133,10 +134,10 @@ def load_config(base_dir: str | None = None) -> Config:
 
     try:
         cfg.panel_sync_sec = max(
-            10, int(_get("PANEL_SYNC_SEC", "PANEL_SYNC_SEC", "45"))
+            10, int(_get("PANEL_SYNC_SEC", "PANEL_SYNC_SEC", "3600"))
         )
     except ValueError:
-        cfg.panel_sync_sec = 45
+        cfg.panel_sync_sec = 3600
 
     return cfg
 

@@ -94,17 +94,15 @@ async def _show_no_config(cb: CallbackQuery):
 
 
 async def _resolve_live(user: dict):
-    """Ищет конфиг пользователя в панели.
+    """Ищет конфиг пользователя в зеркале панели (локально, без сети).
 
     Возвращает ``(live|None, reason)``:
       • ``'ok'``         — конфиг найден;
-      • ``'panel_down'`` — панель недоступна (это НЕ «нет конфига»);
-      • ``'missing'``    — панель отвечает, но конфига у пользователя нет.
+      • ``'panel_down'`` — холодный старт и панель недоступна;
+      • ``'missing'``    — зеркало отвечает, но конфига у пользователя нет.
 
-    Сначала быстрый путь (кэш/зеркало, без запроса к панели); при промахе —
-    ровно ОДИН force-запрос списка, после которого проверяются все ключи
-    (пароль и ``tg<id>``) в памяти. Так отличаем сбой связи от реального
-    отсутствия конфига и не плодим тяжёлые GET-запросы.
+    Ключи: пароль и ``tg<id>`` (комментарий в панели). Панель в горячем
+    пути НЕ опрашивается — свежесть даёт стартовый прогрев + часовой sync.
     """
     ctx = app()
     tg_id = user.get("tg_id")
@@ -120,17 +118,19 @@ async def _resolve_live(user: dict):
         if live:
             return live, "ok"
 
-    # 2) Промах — ровно ОДИН запрос к панели на все ключи сразу.
-    try:
-        await ctx.wdtt.get_users(force=True)
-    except WdttError:
-        return None, "panel_down"
+    # 2) Холодный старт (кэш ни разу не грузился — прогрев не удался):
+    #    ровно ОДИН запрос, чтобы отличить сбой панели от отсутствия.
+    if not ctx.wdtt.cache_ready:
+        try:
+            await ctx.wdtt.get_users(force=True)
+        except WdttError:
+            return None, "panel_down"
 
-    for key in candidates:
-        live = await ctx.wdtt.find_user(key)
+        for key in candidates:
+            live = await ctx.wdtt.find_user(key)
 
-        if live:
-            return live, "ok"
+            if live:
+                return live, "ok"
 
     return None, "missing"
 

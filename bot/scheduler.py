@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 CHECK_EVERY_SEC = 600  # проверяем каждые 10 минут
 
-DEFAULT_SYNC_SEC = 45  # интервал зеркалирования пользователей панели
+DEFAULT_SYNC_SEC = 3600  # интервал зеркалирования пользователей панели (раз в час)
 
 
 async def _panel_sync_once():

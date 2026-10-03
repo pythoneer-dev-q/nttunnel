@@ -57,8 +57,8 @@ class WdttClient:
 
         # Кэш списка пользователей панели + O(1)-индексы для поиска.
         # Панель не отдаёт пользователя по паролю, поэтому список
-        # запрашиваем не на каждый поиск, а по TTL/при изменении данных.
-        self._users_ttl = 15.0
+        # запрашиваем не на каждый поиск: стартовый прогрев + фоновый
+        # sync раз в PANEL_SYNC_SEC; чтения идут из кэша/зеркала.
         self._users_cache: Optional[dict] = None
         self._users_cached_at = 0.0
         self._users_index: dict[str, dict] = {}
@@ -348,8 +348,8 @@ class WdttClient:
     async def get_users(self, force: bool = False) -> dict:
         """{'main_password': ..., 'users': [...], 'inbound': {...}}.
 
-        Результат кэшируется на ``_users_ttl`` секунд. ``force=True``
-        заставляет перечитать список (после записи в панель).
+        ``force=False`` → кэш (без сетевых запросов, cold start — один).
+        ``force=True`` → реальный запрос к панели (мутации/фоновый sync).
         """
         return await self._load_users(force=force)
 
@@ -382,32 +382,32 @@ class WdttClient:
         self._users_index = {}
         self._users_comment_index = {}
 
+    @property
+    def cache_ready(self) -> bool:
+        """True, если список панели хоть раз загружался в память."""
+        return self._users_cache is not None
+
     async def _load_users(self, force: bool = False) -> dict:
-        """Отдаёт список пользователей из кэша или запрашивает один раз.
+        """Отдаёт список пользователей из кэша; панель — только по force.
+
+        Философия: панель парсим редко (стартовый прогрев + фоновый sync
+        раз в ``PANEL_SYNC_SEC``), а на чтения НИКОГДА не ходим в сеть.
+
+        - ``force=False`` → кэш как есть (пусть устаревший); исключение —
+          cold start (кэш ещё ни разу не грузился), тогда один запрос;
+        - ``force=True`` → реальный запрос к панели (мутации/фоновый sync),
+          с барьером <2с от частых повторов.
 
         Single-flight: параллельные вызовы не плодят запросы к панели.
-
-        Список — самый медленный эндпоинт панели (34–40с при 75 юзерах),
-        поэтому для него свой длительный таймаут и retries=0: одна попытка,
-        при неудаче — читатели сразу уходят в stale-кэш/зеркало, а sync
-        повторит на следующей итерации.
         """
-        now = time.monotonic()
-
-        if self._users_cache is not None:
-            if not force and now - self._users_cached_at < self._users_ttl:
-                return self._users_cache
-            if force and now - self._users_cached_at < 2.0:
-                return self._users_cache
+        if not force and self._users_cache is not None:
+            return self._users_cache
 
         async with self._users_lock:
-            now = time.monotonic()
-
-            if self._users_cache is not None:
-                if not force and now - self._users_cached_at < self._users_ttl:
-                    return self._users_cache
-                if force and now - self._users_cached_at < 2.0:
-                    return self._users_cache
+            if not force and self._users_cache is not None:
+                return self._users_cache
+            if force and time.monotonic() - self._users_cached_at < 2.0:
+                return self._users_cache or {}
 
             t0 = time.monotonic()
             data = await self._request(

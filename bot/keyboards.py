@@ -317,7 +317,7 @@ def subscribe_kb(channels: list) -> InlineKeyboardMarkup:
         ])
 
     rows.append([
-        btn("🔄 Я подписался — проверить", "chk:r", style="success"),
+        btn("🔄 Я подписался — проверить", "u:menu", style="success"),
     ])
 
     return markup(*rows)
