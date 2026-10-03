@@ -206,8 +206,10 @@ async def profile_text(tg_id: int):
     live = None
     pwd = u.get("wdtt_password")
     if u.get("registered") and pwd:
+        # Без force: читаем кэш/зеркало (мгновенно). Свежесть — часовой
+        # sync плюс точечные обновления после админ-действий.
         try:
-            live = await ctx.wdtt.find_user(pwd, force=True)
+            live = await ctx.wdtt.find_user(pwd)
         except Exception as e:  # noqa: BLE001 — панель может быть недоступна
             log.warning("profile find_user failed tg=%s: %s", tg_id, e)
             live = None

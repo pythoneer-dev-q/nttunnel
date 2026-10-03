@@ -347,6 +347,34 @@ class Database:
         doc = await self.panel_state.find_one({"_id": "state"}) or {}
         return doc.get("inbound") or {}
 
+    async def upsert_panel_user(self, user: dict):
+        """Точечный upsert ОДНОЙ записи в зеркале.
+
+        В отличие от sync_panel_users — не удаляет остальных (для записи
+        только что созданного пользователя без парсинга всего списка).
+        """
+        key = self._panel_key(user)
+        if not key:
+            return
+        doc = dict(user)
+        doc["_pkey"] = key
+        doc["updated_at"] = utcnow()
+        await self.panel_users.update_one(
+            {"_pkey": key}, {"$set": doc}, upsert=True)
+
+    async def drop_panel_user(self, key: str):
+        """Удаляет запись из зеркала по любому из известных ключей."""
+        if not key:
+            return
+        await self.panel_users.delete_many({
+            "$or": [
+                {"_pkey": key},
+                {"password": key},
+                {"password_key": key},
+                {"comment": key},
+            ]
+        })
+
     async def panel_mirror_updated_at(self):
         doc = await self.panel_state.find_one({"_id": "state"}) or {}
         return doc.get("updated_at")

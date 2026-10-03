@@ -376,7 +376,7 @@ class WdttClient:
         return by_password, by_comment
 
     def invalidate_users(self):
-        """Сбрасывает кэш списка пользователей (после add/update/delete)."""
+        """Сбрасывает кэш списка пользователей (страховка/админские операции)."""
         self._users_cache = None
         self._users_cached_at = 0.0
         self._users_index = {}
@@ -386,6 +386,132 @@ class WdttClient:
     def cache_ready(self) -> bool:
         """True, если список панели хоть раз загружался в память."""
         return self._users_cache is not None
+
+    # ------------------------------------------- точечные операции с кэшем
+    # Вместо инвалидации ВСЕГО кэша (после чего пришлось бы заново
+    # парсить 35-40-секундный список) — правим одну запись напрямую.
+
+    def _cached_users(self) -> list:
+        if self._users_cache is None:
+            self._users_cache = {"users": []}
+        return self._users_cache.setdefault("users", [])
+
+    @staticmethod
+    def _find_cached_index(users: list, key: str, comment: str | None = None):
+        for i, u in enumerate(users):
+            u_key = str(u.get("password_key") or u.get("password") or "")
+            if key and u_key == key:
+                return i
+            if comment and u.get("comment") == comment:
+                return i
+        return None
+
+    async def _upsert_cached(self, user: dict):
+        """Точечно вставляет/обновляет запись в кэше и зеркале."""
+        key = str(user.get("password_key") or user.get("password") or "")
+        comment = user.get("comment") or ""
+        users = self._cached_users()
+
+        idx = self._find_cached_index(users, key, comment)
+
+        if idx is None:
+            merged = dict(user)
+            users.append(merged)
+        else:
+            merged = {**users[idx], **user}
+            users[idx] = merged
+
+        for k in (merged.get("password_key"), merged.get("password")):
+            if k:
+                self._users_index[str(k)] = merged
+        if merged.get("comment"):
+            self._users_comment_index[str(merged["comment"])] = merged
+
+        if self._store is not None:
+            try:
+                await self._store.upsert_panel_user(merged)
+            except Exception as e:  # noqa: BLE001 — зеркало не должно ломать flow
+                log.warning("panel mirror upsert failed: %s", e)
+
+    async def _patch_cached(self, key: str, patch: dict):
+        """Применяет поля к существующей записи в кэше/зеркале."""
+        users = self._cached_users()
+        idx = self._find_cached_index(users, key, key)
+        if idx is None:
+            return  # записи нет — её донесёт часовой sync
+        await self._upsert_cached({**users[idx], **patch})
+
+    async def _drop_cached(self, key: str):
+        """Удаляет запись из кэша и зеркала по паролю/комментарию."""
+        if not key:
+            return
+        users = self._cached_users()
+        idx = self._find_cached_index(users, key, key)
+        if idx is not None:
+            users.pop(idx)
+        self._users_index.pop(key, None)
+        self._users_comment_index.pop(key, None)
+
+        if self._store is not None:
+            try:
+                await self._store.drop_panel_user(key)
+            except Exception as e:  # noqa: BLE001
+                log.warning("panel mirror drop failed: %s", e)
+
+    async def note_user_created(
+        self,
+        password: str,
+        comment: str = "",
+        total_gb: int = 0,
+        max_devices: int = 1,
+    ) -> dict:
+        """Вставляет только что созданного пользователя в кэш/зеркало
+        НАПРЯМУЮ — без парсинга всего списка панели (~35–40 секунд).
+
+        Порты берутся из inbound последнего снапшота; sub_id/sub_url/link
+        панель сгенерирует при ближайшем фоновом sync (раз в час).
+        """
+        ib: dict = {}
+
+        if self._users_cache and isinstance(
+            self._users_cache.get("inbound"), dict
+        ):
+            ib = self._users_cache["inbound"]
+        elif self._store is not None:
+            try:
+                ib = await self._store.get_panel_inbound() or {}
+            except Exception:  # noqa: BLE001
+                ib = {}
+
+        user = {
+            "password": password,
+            "password_key": password,
+            "comment": comment,
+            "total_gb": total_gb,
+            "max_devices": max_devices,
+            "active": True,
+            "online": False,
+            "expires": "бессрочно",
+            "expires_at": 0,
+            "traffic_used": 0,
+            "traffic_used_fmt": "0.0 KB",
+            "down": "0.0 KB",
+            "up": "0.0 KB",
+            "down_bytes": 0,
+            "up_bytes": 0,
+            "total_bytes": 0,
+            "traffic_exceeded": False,
+            "devices_bound": 0,
+            "device_ids": [],
+            "vk_hash": "",
+            "is_main": False,
+            "dtls_port": ib.get("dtls_port") or 0,
+            "wg_port": ib.get("wg_port") or 0,
+            "client_port": ib.get("client_port") or 0,
+        }
+
+        await self._upsert_cached(user)
+        return user
 
     async def _load_users(self, force: bool = False) -> dict:
         """Отдаёт список пользователей из кэша; панель — только по force.
@@ -477,7 +603,8 @@ class WdttClient:
             payload,
         )
 
-        self.invalidate_users()
+        # Кэш НЕ инвалидируем: запись нового пользователя добавляется
+        # точечно через note_user_created (без парсинга всего списка).
 
         if isinstance(obj, dict):
             passwords = obj.get("passwords")
@@ -507,7 +634,14 @@ class WdttClient:
             payload,
         )
 
-        self.invalidate_users()
+        # Точечное обновление одной записи — кэш не сносим целиком.
+        if fields.get("password") and str(fields["password"]) != str(password):
+            # Пароль сменился: старую запись убираем, свежую даст sync.
+            await self._drop_cached(password)
+        else:
+            patch = {k: v for k, v in fields.items() if k != "password"}
+            if patch:
+                await self._patch_cached(password, patch)
 
         return result
 
@@ -518,13 +652,8 @@ class WdttClient:
             {"password": password},
         )
 
-        self.invalidate_users()
-
-        if self._store is not None:
-            try:
-                await self._store.panel_users.delete_many({"password": password})
-            except Exception as e:
-                log.warning("panel mirror delete failed: %s", e)
+        # Точечно убираем одну запись из кэша и зеркала.
+        await self._drop_cached(password)
 
         return result
 
@@ -535,7 +664,17 @@ class WdttClient:
             {"password": password},
         )
 
-        self.invalidate_users()
+        # Обнуляем счётчики в кэше/зеркале точечно.
+        await self._patch_cached(password, {
+            "traffic_used": 0,
+            "traffic_used_fmt": "0.0 KB",
+            "down": "0.0 KB",
+            "up": "0.0 KB",
+            "down_bytes": 0,
+            "up_bytes": 0,
+            "total_bytes": 0,
+            "traffic_exceeded": False,
+        })
 
         return result
 

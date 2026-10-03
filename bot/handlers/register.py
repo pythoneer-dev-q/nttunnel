@@ -638,10 +638,13 @@ async def cb_hash_done(
             tg_id,
         )
 
-        # Получаем актуальные данные.
-        live = (
-            await ctx.wdtt.find_user(password, force=True)
-            or {}
+        # Вставляем нового пользователя в кэш/зеркало НАПРЯМУЮ —
+        # без парсинга всего списка панели (~35–40 секунд).
+        live = await ctx.wdtt.note_user_created(
+            password,
+            comment=f"tg{tg_id}",
+            total_gb=gb,
+            max_devices=dev,
         )
 
         sub_id = live.get("sub_id") or ""
@@ -773,7 +776,16 @@ async def cb_show_link(
     link = (
         u.get("wdtt_link")
         or u.get("sub_url")
+        or ""
     )
+
+    # Fallback: взять из кэша/зеркала панели (мгновенно, без сети).
+    if not link and u.get("wdtt_password"):
+        try:
+            live = await app().wdtt.find_user(u["wdtt_password"]) or {}
+        except Exception:  # noqa: BLE001
+            live = {}
+        link = live.get("link") or live.get("sub_url") or ""
 
     if not link:
         return await answer_or_alert(
