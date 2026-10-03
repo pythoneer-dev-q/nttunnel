@@ -101,28 +101,33 @@ async def _resolve_live(user: dict):
       • ``'panel_down'`` — панель недоступна (это НЕ «нет конфига»);
       • ``'missing'``    — панель отвечает, но конфига у пользователя нет.
 
-    Сначала быстрый путь (кэш/зеркало, без запроса к панели), и только при
-    промахе — прямой **строгий** запрос, чтобы отличить сбой связи от
-    реального отсутствия конфига.
+    Сначала быстрый путь (кэш/зеркало, без запроса к панели); при промахе —
+    ровно ОДИН force-запрос списка, после которого проверяются все ключи
+    (пароль и ``tg<id>``) в памяти. Так отличаем сбой связи от реального
+    отсутствия конфига и не плодим тяжёлые GET-запросы.
     """
     ctx = app()
     tg_id = user.get("tg_id")
     pwd = user.get("wdtt_password") or ""
 
-    if pwd:
-        live = await ctx.wdtt.find_user(pwd)
+    # Запасной ключ: панель хранит комментарий как "tg<id>" (см. регистрацию).
+    candidates = [c for c in (pwd, f"tg{tg_id}" if tg_id else "") if c]
+
+    # 1) Быстрый путь: in-memory кэш / зеркало Mongo — без запроса к панели.
+    for key in candidates:
+        live = await ctx.wdtt.find_user(key)
 
         if live:
             return live, "ok"
 
-    # Запасной ключ: панель хранит комментарий как "tg<id>" (см. регистрацию).
-    candidates = [c for c in (pwd, f"tg{tg_id}" if tg_id else "") if c]
+    # 2) Промах — ровно ОДИН запрос к панели на все ключи сразу.
+    try:
+        await ctx.wdtt.get_users(force=True)
+    except WdttError:
+        return None, "panel_down"
 
     for key in candidates:
-        try:
-            live = await ctx.wdtt.find_user(key, force=True, strict=True)
-        except WdttError:
-            return None, "panel_down"
+        live = await ctx.wdtt.find_user(key)
 
         if live:
             return live, "ok"
@@ -159,9 +164,6 @@ async def cb_traffic(cb: CallbackQuery, user: dict):
 
     if not user.get("registered"):
         return await _show_no_config(cb)
-
-    # Анимация загрузки перед запросом к серверу.
-    await _edit_loading(cb, step=1)
 
     live, reason = await _resolve_live(user)
 
@@ -202,9 +204,6 @@ async def cb_sub(cb: CallbackQuery, user: dict):
 
     if not user.get("registered"):
         return await _show_no_config(cb)
-
-    # Анимация загрузки перед запросом к серверу.
-    await _edit_loading(cb, step=2)
 
     live, reason = await _resolve_live(user)
 
@@ -576,7 +575,9 @@ async def cb_hash_done(
 
     u = await ctx.db.get_user(tg_id) or {}
 
-    if u.get("registered"):
+    recreate = bool(data.get("recreate"))
+
+    if not recreate and u.get("registered"):
         await state.clear()
 
         return await answer_or_alert(
@@ -594,13 +595,6 @@ async def cb_hash_done(
             True,
         )
 
-    if u.get("creating"):
-        return await answer_or_alert(
-            cb,
-            "Подписка уже создаётся",
-            True,
-        )
-
     gb = int(
         settings.get("default_total_gb") or 175
     )
@@ -611,10 +605,14 @@ async def cb_hash_done(
 
     inviter = await _self_inviter(tg_id)
 
-    await ctx.db.users.update_one(
-        {"tg_id": tg_id},
-        {"$set": {"creating": True}},
-    )
+    # Атомарный клейм: сбрасывает зависшие заявки старше 90 секунд
+    # (сбои/рестарты) и защищает от race condition при двойном нажатии.
+    if not await ctx.db.claim_creating(tg_id, allow_recreate=recreate):
+        return await answer_or_alert(
+            cb,
+            "Подписка уже создаётся",
+            True,
+        )
 
     try:
         log.info(
@@ -639,19 +637,6 @@ async def cb_hash_done(
             "[reg] panel add_user OK tg=%s",
             tg_id,
         )
-
-        # VK-хеши → панель.
-        if hashes:
-            try:
-                await ctx.wdtt.update_user(
-                    password,
-                    vk_hash=",".join(hashes),
-                )
-            except Exception as e:
-                log.warning(
-                    "[reg] set vk_hash failed: %s",
-                    e,
-                )
 
         # Получаем актуальные данные.
         live = (
@@ -689,7 +674,8 @@ async def cb_hash_done(
                     "sub_app": app_name,
                     "sub_vk_hashes": hashes,
                     "referral_of": inviter,
-                }
+                },
+                "$unset": {"creating_at": ""},
             },
         )
 
@@ -738,10 +724,7 @@ async def cb_hash_done(
         )
 
     except Exception as e:
-        await ctx.db.users.update_one(
-            {"tg_id": tg_id},
-            {"$set": {"creating": False}},
-        )
+        await ctx.db.release_creating(tg_id)
 
         await ctx.db.log_event(
             tg_id,

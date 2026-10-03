@@ -83,6 +83,14 @@ def back_menu_kb() -> InlineKeyboardMarkup:
     ])
 
 
+def support_kb() -> InlineKeyboardMarkup:
+    return markup(
+        [btn("📝 Написать обращение", "u:ticket:new", style="primary")],
+        [btn("📬 Мои обращения", "u:ticket:list")],
+        [btn("↩️ В меню", "u:menu")],
+    )
+
+
 # ------------------------------------------------------ нет конфига
 
 def no_config_kb() -> InlineKeyboardMarkup:

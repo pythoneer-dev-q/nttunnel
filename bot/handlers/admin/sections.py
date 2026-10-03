@@ -27,27 +27,58 @@ log = logging.getLogger(__name__)
 router = Router(name="adm-sections")
 
 
-@router.callback_query(F.data == "adm:sec")
-async def cb_sections_list(cb: CallbackQuery):
-    if not cb.message:
-        return await answer_or_alert(cb)
+async def _render_sections_list(cb: CallbackQuery):
+    """Рисует список разделов (без answer — для переиспользования)."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
     ctx = app()
     sections = await ctx.db.list_sections()
+
     if not sections:
         await safe_edit(
             cb.message,
             "📂 <b>Конструктор разделов</b>\n\nПока пусто.",
             adm_back_kb("adm"),
         )
-        return await answer_or_alert(cb)
+        return
+
+    kb = InlineKeyboardBuilder()
+    for s in sections:
+        kb.button(text=f"🗑 {s['key']}",
+                  callback_data=f"adm:sec:del:{s['key']}")
+    kb.button(text="➕ Новый раздел", callback_data="adm:sec:add")
+    kb.button(text="⬅️ В админку", callback_data="adm")
+    kb.adjust(1)
+
     lines = [f"• <code>{s['key']}</code> — {esc(s.get('title', '')[:40])}"
              for s in sections]
     await safe_edit(
         cb.message,
         "📂 <b>Конструктор разделов</b>\n\n" + "\n".join(lines),
-        adm_back_kb("adm"),
+        kb.as_markup(),
     )
+
+
+@router.callback_query(F.data == "adm:sec")
+async def cb_sections_list(cb: CallbackQuery):
+    if not cb.message:
+        return await answer_or_alert(cb)
+    await _render_sections_list(cb)
     await answer_or_alert(cb)
+
+
+@router.callback_query(F.data.startswith("adm:sec:del:"))
+async def cb_section_del(cb: CallbackQuery):
+    """Удаление раздела прямо из списка."""
+    if not cb.message:
+        return await answer_or_alert(cb)
+    key = cb.data.removeprefix("adm:sec:del:")
+    ctx = app()
+    await ctx.db.delete_section(key)
+    ctx.gate.list_cache.pop("sections", None)
+    await ctx.db.log_event(cb.from_user.id, "section_deleted", key)
+    await _render_sections_list(cb)
+    await answer_or_alert(cb, f"🗑 Раздел «{key}» удалён")
 
 
 @router.callback_query(F.data == "adm:sec:add")
@@ -71,12 +102,15 @@ async def cmd_add_section(message: Message):
     """Быстрое создание раздела: /addsection key | title | text."""
     if not message.text:
         return
-    parts = [p.strip() for p in message.text.split("|")]
+    # Убираем саму команду: "/addsection key | title | text" -> "key | ...".
+    # Иначе parts[0] = "/addsection key" и валидация ключа всегда падала.
+    raw = message.text.partition(" ")[2]
+    parts = [p.strip() for p in raw.split("|")]
     if len(parts) < 3:
         return await message.answer(
             "Формат: <code>/addsection key | Заголовок | Текст раздела</code>")
     key, title, text = parts[0], parts[1], parts[2]
-    if not key.replace("_", "").replace("-", "").isalnum():
+    if not key or not key.replace("_", "").replace("-", "").isalnum():
         return await message.answer("Ключ — только латиница, _, -")
     ctx = app()
     await ctx.db.save_section(key, {"title": title, "text": text, "buttons": []})

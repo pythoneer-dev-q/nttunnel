@@ -250,12 +250,38 @@ class Database:
     async def list_sections(self) -> list:
         return [s async for s in self.sections.find().sort("key", 1)]
 
-        total = int(settings.get("slots_total") or 0)
-        if not total:
-            return True, -1
-        used = await self.registered_count()
-        left = max(total - used, 0)
-        return left > 0, left
+    async def claim_creating(
+        self,
+        tg_id: int,
+        allow_recreate: bool = False,
+        timeout_sec: int = 90,
+    ) -> bool:
+        """Атомарный клейм создания подписки с защитой от залипания и гонок."""
+        now = utcnow()
+        timeout_dt = datetime.fromtimestamp(now.timestamp() - timeout_sec, tz=timezone.utc)
+        query: dict = {
+            "tg_id": tg_id,
+            "$or": [
+                {"creating": {"$ne": True}},
+                {"creating_at": {"$lt": timeout_dt}},
+            ],
+        }
+        if not allow_recreate:
+            query["registered"] = {"$ne": True}
+
+        res = await self.users.find_one_and_update(
+            query,
+            {"$set": {"creating": True, "creating_at": now}},
+            return_document=ReturnDocument.AFTER,
+        )
+        return res is not None
+
+    async def release_creating(self, tg_id: int):
+        """Сброс флага создания подписки."""
+        await self.users.update_one(
+            {"tg_id": tg_id},
+            {"$set": {"creating": False}, "$unset": {"creating_at": ""}},
+        )
 
     async def save_settings(self, patch: dict):
         await self.settings_col.update_one(

@@ -10,7 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from ...context import app
-from ...keyboards import adm_back_kb
+from ...keyboards import adm_back_kb, adm_root_kb
 from ...texts import esc
 from ...utils import answer_or_alert, fmt_dt, safe_edit
 
@@ -206,7 +206,11 @@ async def profile_text(tg_id: int):
     live = None
     pwd = u.get("wdtt_password")
     if u.get("registered") and pwd:
-        live = await ctx.wdtt.find_user(pwd, force=True)
+        try:
+            live = await ctx.wdtt.find_user(pwd, force=True)
+        except Exception as e:  # noqa: BLE001 — панель может быть недоступна
+            log.warning("profile find_user failed tg=%s: %s", tg_id, e)
+            live = None
 
     name = u.get("full_name") or ""
     username = "@" + u["username"] if u.get("username") else "—"

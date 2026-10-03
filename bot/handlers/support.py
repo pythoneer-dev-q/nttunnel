@@ -9,7 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from ..context import app
-from ..keyboards import back_menu_kb
+from ..keyboards import back_menu_kb, support_kb
 from ..texts import esc
 from ..utils import answer_or_alert, safe_edit
 
@@ -37,16 +37,22 @@ HELP_TEXT = (
 @router.message(Command("support"))
 @router.callback_query(F.data == "u:support")
 async def open_support(event, user: dict):
-    """Открывает меню поддержки."""
-    if not getattr(event, "message", None):
-        return await answer_or_alert(event)
-    text = HELP_TEXT
-    kb = back_menu_kb()
+    """Открывает меню поддержки — как командой /support, так и кнопкой.
+
+    ВАЖНО: у Message нет атрибута ``message``, поэтому сначала
+    различаем тип события, иначе /support падал в answer_or_alert.
+    """
+    kb = support_kb()
+
     if isinstance(event, Message):
-        await event.answer(text, reply_markup=kb)
-    else:
-        await safe_edit(event.message, text, kb)
-        await answer_or_alert(event)
+        await event.answer(HELP_TEXT, reply_markup=kb)
+        return
+
+    if not event.message:
+        return await answer_or_alert(event)
+
+    await safe_edit(event.message, HELP_TEXT, kb)
+    await answer_or_alert(event)
 
 
 @router.callback_query(F.data == "u:ticket:new")

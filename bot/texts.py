@@ -395,7 +395,7 @@ def config_text(
 
 def sub_text(
     live: dict,
-    hashes: dict,
+    hashes: list,
     app: str = "WDTT",
 ) -> str:
     sub_url = live.get("sub_url") or ""
@@ -410,24 +410,19 @@ def sub_text(
 
     total_s = f"{float(total_gb):.2f} ГБ" if total_gb else "∞"
 
-    # КРИТИЧНО:
-    # Если серверный IP/host не загрузился, НЕ строим сырые конфиги.
-    host = live.get("server_host") or live.get("ip") or ""
-    dtls = live.get("dtls_port") or 0
-    wg = live.get("wg_port") or 0
-    lp = live.get("client_port") or 0
-    pwd = live.get("password_key") or ""
-    name = live.get("comment") or "WDTT"
+    status = ("🟢 активна" if live.get("active", True)
+              else "⏸ приостановлена")
+    online = "🟢 в сети" if live.get("online") else "⚪ не в сети"
+    expires = live.get("expires") or "бессрочно"
 
     lines = [
         "📄 <b>Информация о подписке</b>\n",
         f"🆔 ID подписки: <code>{esc(sub_id)}</code>",
-        "🟢 Статус: Активна",
-        f"📥 Загружено: {esc(live.get('down') or '0 Б')}",
-        f"📤 Отправлено: {esc(live.get('up') or '0 Б')}",
-        f"📊 Использование: {esc(used_s)}",
+        f"Статус: <b>{status}</b>",
+        f"📡 Онлайн: <b>{online}</b>",
+        f"📊 Использовано: {esc(used_s)}",
         f"💾 Общий лимит: {esc(total_s)}",
-        f"🕒 Был(а) в сети: {esc(live.get('expires') or 'Бессрочно')}",
+        f"⏰ Срок действия: {esc(expires)}",
         "",
     ]
 

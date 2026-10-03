@@ -111,10 +111,13 @@ async def cb_server(cb: CallbackQuery):
     try:
         ib = await ctx.wdtt.get_inbound()
     except Exception as e:  # noqa: BLE001
-        return await safe_edit(
+        await safe_edit(
             cb.message,
             f"🔌 Панель недоступна: <code>{str(e)[:200]}</code>",
             adm_back_kb("adm"))
+        # Без answer кружок загрузки на кнопке Telegram крутится вечно.
+        await answer_or_alert(cb)
+        return
     text = (
         "🔌 <b>Подключения / сервер</b>\n\n"
         f"🏷 Tag: <b>{ib.get('tag')}</b> · remark: {ib.get('remark')}\n"

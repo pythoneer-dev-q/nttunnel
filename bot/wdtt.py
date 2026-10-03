@@ -135,54 +135,33 @@ class WdttClient:
 
         try:
             async with s.get(f"{self.base}/login") as r:
-                await r.release()
+                html = await r.text()
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             log.debug("CSRF seed failed: %s", e)
             return ""
 
-        cookies = s.cookie_jar.filter_cookies(f"{self.base}/login")
+        for path in (f"{self.base}/login", self.base + "/"):
+            cookies = s.cookie_jar.filter_cookies(path)
+            for name in self.PREV_NAME_LIST:
+                cookie = cookies.get(name)
+                if cookie is not None and cookie.value:
+                    return cookie.value
 
-        for name in self.PREV_NAME_LIST:
-            cookie = cookies.get(name)
-            if cookie is not None and cookie.value:
-                return cookie.value
-
-        cookies = s.cookie_jar.filter_cookies(self.base + "/")
-
-        for name in self.PREV_NAME_LIST:
-            cookie = cookies.get(name)
-            if cookie is not None and cookie.value:
-                return cookie.value
+        match = _CSRF_HTML_RE.search(html)
+        if match:
+            return match.group(1) or match.group(2) or ""
 
         return ""
 
     async def _csrf_from_html(self, s) -> str:
         """Fallback: извлекает CSRF из HTML /login."""
-
-        try:
-            async with s.get(f"{self.base}/login") as r:
-                html = await r.text()
-        except (aiohttp.ClientError, asyncio.TimeoutError):
-            return ""
-
-        match = _CSRF_HTML_RE.search(html)
-
-        if not match:
-            return ""
-
-        return match.group(1) or match.group(2) or ""
+        return await self._seed_csrf(s)
 
     async def _refresh_csrf(self, s) -> str:
         """Обновляет CSRF только при необходимости."""
-
         token = await self._seed_csrf(s)
-
-        if not token:
-            token = await self._csrf_from_html(s)
-
         if token:
             self._csrf = token
-
         return self._csrf
 
     async def _ensure_login(self):
@@ -397,22 +376,20 @@ class WdttClient:
         """
         now = time.monotonic()
 
-        if (
-            not force
-            and self._users_cache is not None
-            and now - self._users_cached_at < self._users_ttl
-        ):
-            return self._users_cache
+        if self._users_cache is not None:
+            if not force and now - self._users_cached_at < self._users_ttl:
+                return self._users_cache
+            if force and now - self._users_cached_at < 2.0:
+                return self._users_cache
 
         async with self._users_lock:
             now = time.monotonic()
 
-            if (
-                not force
-                and self._users_cache is not None
-                and now - self._users_cached_at < self._users_ttl
-            ):
-                return self._users_cache
+            if self._users_cache is not None:
+                if not force and now - self._users_cached_at < self._users_ttl:
+                    return self._users_cache
+                if force and now - self._users_cached_at < 2.0:
+                    return self._users_cache
 
             data = await self._request("GET", "/panel/api/users")
 
@@ -512,6 +489,12 @@ class WdttClient:
         )
 
         self.invalidate_users()
+
+        if self._store is not None:
+            try:
+                await self._store.panel_users.delete_many({"password": password})
+            except Exception as e:
+                log.warning("panel mirror delete failed: %s", e)
 
         return result
 

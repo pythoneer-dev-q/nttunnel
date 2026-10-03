@@ -59,6 +59,9 @@ async def _reset_once():
                                {"tg_id": 1, "wdtt_password": 1,
                                 "last_traffic_reset": 1})
     async for u in cursor:
+        pwd = u.get("wdtt_password")
+        if not pwd:
+            continue  # без пароля запрос к панели бессмысленен
         last = u.get("last_traffic_reset")
         if last is not None and last.tzinfo is None:
             last = last.replace(tzinfo=timezone.utc)  # naive -> UTC
@@ -66,7 +69,7 @@ async def _reset_once():
         if not due:
             continue
         try:
-            await ctx.wdtt.reset_traffic(u["wdtt_password"])
+            await ctx.wdtt.reset_traffic(pwd)
             await ctx.db.users.update_one(
                 {"tg_id": u["tg_id"]}, {"$set": {"last_traffic_reset": now}})
             log.info("traffic reset for %s", u["tg_id"])

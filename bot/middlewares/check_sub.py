@@ -59,11 +59,12 @@ class UserGate(BaseMiddleware):
         self.list_cache.set("sections", sections)
         return sections
 
-    async def check_membership(self, bot, tg_id: int, ch: dict) -> bool:
+    async def check_membership(self, bot, tg_id: int, ch: dict, force: bool = False) -> bool:
         key = f"m:{tg_id}:{ch['channel_id']}"
-        cached = self.member_cache.get(key)
-        if cached is not None:
-            return cached
+        if not force:
+            cached = self.member_cache.get(key)
+            if cached is not None:
+                return cached
         try:
             member = await bot.get_chat_member(ch["channel_id"], tg_id)
             ok = member.status not in ("left", "kicked")
@@ -71,12 +72,16 @@ class UserGate(BaseMiddleware):
             log.warning("membership check fail ch=%s: %s",
                         ch.get("channel_id"), e)
             ok = True  # ошибка бота не должна блокировать пользователя
-        self.member_cache.set(key, ok)
+
+        if ok:
+            self.member_cache.set(key, True)
+        else:
+            self.member_cache.pop(key)
         return ok
 
-    async def all_subscribed(self, bot, tg_id: int, channels: list) -> bool:
+    async def all_subscribed(self, bot, tg_id: int, channels: list, force: bool = False) -> bool:
         for ch in channels:
-            if not await self.check_membership(bot, tg_id, ch):
+            if not await self.check_membership(bot, tg_id, ch, force=force):
                 return False
         return True
 
@@ -123,7 +128,7 @@ class UserGate(BaseMiddleware):
             channels = await self.get_channels()
             missing = []
             for ch in channels:
-                ok = await self.check_membership(bot, tg_id, ch)
+                ok = await self.check_membership(bot, tg_id, ch, force=True)
                 if not ok:
                     missing.append(ch)
             registered = bool(user_doc.get("registered"))

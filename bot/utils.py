@@ -351,7 +351,7 @@ class TTLCache:
             time.time(),
         )
 
-    def pop(self, key):
+    def pop(self, key, default=None):
         """Удаляет значение из кэша."""
 
         return self._data.pop(
