@@ -318,6 +318,9 @@ async def cb_user_action(cb: CallbackQuery, state: FSMContext):
 
     # ---- сброс трафика
     if act == "rst":
+        if not u.get("wdtt_password"):
+            return await answer_or_alert(
+                cb, "У пользователя нет пароля в панели", True)
         try:
             await ctx.wdtt.reset_traffic(u["wdtt_password"])
             await ctx.db.log_event(tg_id, "traffic_reset", "by admin")

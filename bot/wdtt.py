@@ -24,6 +24,17 @@ class WdttError(Exception):
     pass
 
 
+# Таймаут для «тяжёлых» запросов к панели (GET /panel/api/users).
+# Замерено: при 75 пользователях панель отдаёт список за 34–40 секунд
+# (и в keep-alive тоже — сервер считает ответ каждый раз), поэтому
+# дефолтный sock_read=20 сессии его всегда обрывал.
+SLOW_TIMEOUT = aiohttp.ClientTimeout(
+    total=90,
+    sock_connect=10,
+    sock_read=90,
+)
+
+
 class WdttClient:
     PREV_NAME_LIST = ("wdtt-csrf",)
 
@@ -253,6 +264,7 @@ class WdttClient:
         path: str,
         payload: Any = None,
         retries: int = 2,
+        timeout: Optional[aiohttp.ClientTimeout] = None,
     ) -> Any:
         s = await self._get_session()
         url = f"{self.base}{path}"
@@ -281,6 +293,7 @@ class WdttClient:
                     url,
                     json=body if body is not None else {},
                     headers=headers,
+                    timeout=timeout,  # None → таймаут сессии
                 ) as r:
                     text = await r.text()
 
@@ -373,6 +386,11 @@ class WdttClient:
         """Отдаёт список пользователей из кэша или запрашивает один раз.
 
         Single-flight: параллельные вызовы не плодят запросы к панели.
+
+        Список — самый медленный эндпоинт панели (34–40с при 75 юзерах),
+        поэтому для него свой длительный таймаут и retries=0: одна попытка,
+        при неудаче — читатели сразу уходят в stale-кэш/зеркало, а sync
+        повторит на следующей итерации.
         """
         now = time.monotonic()
 
@@ -391,7 +409,19 @@ class WdttClient:
                 if force and now - self._users_cached_at < 2.0:
                     return self._users_cache
 
-            data = await self._request("GET", "/panel/api/users")
+            t0 = time.monotonic()
+            data = await self._request(
+                "GET", "/panel/api/users",
+                retries=0, timeout=SLOW_TIMEOUT,
+            )
+            elapsed = time.monotonic() - t0
+
+            if elapsed > 10.0:
+                log.info(
+                    "panel users list slow: %.1fs (%d users)",
+                    elapsed,
+                    len((data or {}).get("users") or []),
+                )
 
             if not isinstance(data, dict):
                 data = {}
