@@ -1,14 +1,23 @@
 # -*- coding: utf-8 -*-
-"""Все тексты пользовательских экранов (HTML)."""
+"""Тексты экранов бота (HTML).
 
-import html
-import bot.config as config
+Стиль: коротко, по делу, трафик — на видном месте.
+"""
+from __future__ import annotations
 
-def esc(s) -> str:
-    if not s:
+from .wdtt import (
+    expires_text,
+    human_bytes,
+    traffic_bar,
+    user_status,
+)
+
+
+def esc(value) -> str:
+    if value is None:
         return ""
     return (
-        str(s)
+        str(value)
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
@@ -16,10 +25,7 @@ def esc(s) -> str:
 
 
 def quote(text: str) -> str:
-    """Оборачивает длинный текст в Telegram HTML blockquote."""
-    if not text:
-        return ""
-    return f"<blockquote>{text}</blockquote>"
+    return f"<blockquote>{text}</blockquote>" if text else ""
 
 
 DEFAULT_APP_LINKS = [
@@ -36,401 +42,341 @@ DEFAULT_APP_LINKS = [
         "url": "https://apps.apple.com/app/vk-turn-proxy/id6477145458",
     },
     {
-        "label": "💻 Desktop — PWDTT",
+        "label": "💻 Windows/Linux — PWDTT",
         "url": "https://github.com/ildarmaga/pwdtt-client/releases",
     },
 ]
 
-
 DEFAULT_AGREEMENT = (
-    "<b>📜 Пользовательское соглашение</b>\n\n"
-    "Это <b>тестовая технология</b>. Она предоставляется «как есть» (AS IS) "
-    "без каких-либо гарантий работоспособности, стабильности и отсутствия "
-    "сбоев. Используя сервис, ты соглашаешься с тем, что:\n\n"
-    "• трафик шифруется (DTLS 1.2), логи подключений не ведутся;\n"
-    "• доступ работает через TURN-серверы VK Звонков и зависит от их доступности;\n"
-    "• администрация может временно приостановить доступ без объяснения причин;\n"
-    "• ты не используешь сервис для противоправных действий.\n\n"
-    "Нажимая «Да, продолжить», ты подтверждаешь согласие с условиями."
+    "Сервис работает по технологии WDTT: трафик идёт через медиарелеи ВК "
+    "и шифруется DTLS 1.2.\n\n"
+    "• технология предоставляется «как есть», возможны перебои;\n"
+    "• логи подключений не ведутся;\n"
+    "• доступ зависит от доступности серверов ВК;\n"
+    "• запрещено использовать сервис для противоправных действий.\n\n"
+    "Продолжая, вы принимаете эти условия."
 )
 
 
-def hello_text(user: dict) -> str:
-    name = user.get("full_name") or f"id{user.get('tg_id', '')}"
-    return f"👋 Привет, <b>{esc(name)}</b>!"
+# ------------------------------------------------------------ трафик
 
 
-def app_caption(app: str) -> str:
+def traffic_line(user: dict) -> str:
+    total_gb = user.get("total_gb")
+    used = user.get("traffic_used_bytes")
+
+    bar, used_s, total_s, pct = traffic_bar(used, total_gb)
+
+    if total_s == "∞":
+        return f"📊 <b>{used_s}</b> · безлимит"
+
+    return f"📊 <b>{used_s}</b> / {total_s} · <b>{pct}%</b>\n<code>{bar}</code>"
+
+
+def _snapshot(user: dict) -> dict:
+    """Данные панели, сохранённые в профиле бота."""
     return {
-        "WDTT": "WDTT (Android+iOS)",
-        "qWDTT": "qWDTT (Android)",
-    }.get(app, app)
+        "total_gb": user.get("panel_total_gb", user.get("sub_total_gb", 0)),
+        "traffic_used_bytes": user.get(
+            "panel_traffic_used_bytes", user.get("sub_traffic_used_bytes", 0)
+        ),
+        "expires_at": user.get(
+            "panel_expires_at", user.get("sub_expires_at", 0)
+        ),
+        "max_devices": user.get(
+            "panel_max_devices", user.get("sub_max_devices", 1)
+        ),
+        "devices_bound": user.get("panel_devices_bound", 0),
+        "online": user.get("panel_online", False),
+        "active": user.get("panel_active", True),
+        "status": user.get("panel_status", "active"),
+        "subscription_url": user.get("subscription_url", ""),
+        "link": user.get("panel_link", user.get("wdtt_link", "")),
+    }
+
+
+def status_line(user: dict) -> str:
+    status, _ = user_status(user)
+    expires = expires_text(user.get("expires_at"))
+    devices = f"{user.get('devices_bound') or 0}/{user.get('max_devices') or '?'}"
+    return f"📅 {expires} · 👥 {devices} · {status}"
 
 
 # ------------------------------------------------------------ меню
 
-def menu_text(user: dict, limit_gb: int = 175) -> str:
-    text = (
-        "👋 <b>NTTunnel</b>\n\n"
-        "WireGuard через TURN-серверы VK Звонков.\n"
-        "Трафик шифруется DTLS 1.2 — работает там, где заблокирован обычный VPN.\n\n"
-        "<blockquote><b>Возможности:</b>\n"
-        "• 1 устройство\n"
-        f"• {limit_gb} ГБ трафика в месяц\n"
-        "• +5 ГБ за каждого приглашённого\n\n</blockquote>"
-        "Нужны активные ссылки на VK Звонок."
+
+def _name(user: dict) -> str:
+    return esc(
+        user.get("full_name")
+        or user.get("first_name")
+        or (f"@{user['username']}" if user.get("username") else "")
+        or user.get("tg_id")
+        or "друг"
     )
-    return text
+
+
+def menu_text(user: dict, live: dict | None = None) -> str:
+    data = live if live is not None else _snapshot(user)
+    registered = bool(user.get("registered"))
+
+    lines = [f"👋 <b>{_name(user)}</b>", ""]
+
+    if registered and (
+        "total_gb" in data or "traffic_used_bytes" in data
+    ):
+        lines.append(traffic_line(data))
+        lines.append(status_line({"status": data.get("status", "active"),
+                                  "expires_at": data.get("expires_at"),
+                                  "devices_bound": data.get("devices_bound"),
+                                  "max_devices": data.get("max_devices"),
+                                  "online": data.get("online")}))
+    elif registered:
+        lines.append("📊 <b>Нет данных о трафике</b>")
+        lines.append("Открой «Мой доступ» для обновления.")
+    else:
+        lines.append("🔑 Доступ ещё не создан")
+
+    return "\n".join(lines)
 
 
 def no_config_text() -> str:
-    text = (
-        "<b>Что нужно:</b>\n"
-        "Активная ссылка на VK Звонок — она нужна для получения TURN credentials.\n\n"
-        "<b>Как получить:</b>\n"
-        "ВК → Мессенджер → Звонки → Создать → Скопировать ссылку\n"
-        "⚠️ Не нажимай «Завершить для всех»"
-    )
-    return (
-        "🔑 <b>У тебя пока нет конфига.</b>\n\n"
-        f"{quote(text)}"
-    )
+    return "🔑 <b>Доступ не создан</b>\n\nНажми «Создать доступ» — это займёт пару секунд."
 
 
 def no_slots_text() -> str:
-    return (
-        "🚷 <b>Нет мест</b>\n\n"
-        "Регистрация временно закрыта. Попробуй позже."
-    )
+    return "🚷 <b>Свободных мест нет</b>\n\nРегистрация временно закрыта. Попробуй позже."
 
 
 def panel_down_text() -> str:
-    """Панель недоступна — конфиг на месте, просто не удалось прочитать."""
     return (
-        "🔌 <b>Панель временно недоступна</b>\n\n"
-        "<blockquote>Не удалось получить данные подписки из панели WDTT.\n\n"
-        "Твой конфиг никуда не пропал — это сбой связи. "
-        "Подожди минуту и нажми «Обновить».</blockquote>"
+        "🔌 <b>Панель недоступна</b>\n\n"
+        "Данные не удалось обновить. Доступ не потерян — попробуй ещё раз через минуту."
     )
 
 
 def config_missing_text() -> str:
-    """Бот считает, что подписка есть, а панель её не отдаёт."""
     return (
-        "🔑 <b>Конфиг не найден в панели</b>\n\n"
-        "<blockquote>В боте подписка числится, но панель WDTT не отдаёт "
-        "по ней данные.\n\n"
-        "Обычно так бывает, если конфиг удалили в панели или сбросили её "
-        "базу.\n\n"
-        "Нажми «Пересоздать конфиг» — старая запись будет заменена новой."
-        "</blockquote>"
+        "⚠️ <b>Доступ не найден в панели</b>\n\n"
+        "Скорее всего, его удалили вручную. Можно создать новый."
     )
 
 
-# ------------------------------------------------------ флоу регистрации
-
-STEP_APP = (
-    "🔑 <b>У тебя пока нет конфига.</b>\n\n"
-    "<blockquote>"
-    "<b>Что нужно:</b>\n"
-    "Активная ссылка на VK Звонок — она нужна для получения TURN credentials.\n\n"
-    "<b>Как получить:</b>\n"
-    "ВК → Мессенджер → Звонки → Создать → Скопировать ссылку\n"
-    "⚠️ Не нажимай «Завершить для всех»"
-    "</blockquote>\n\n"
-    "—— <b>Шаг 1 из 3 — приложение</b> ——\n\n"
-    "Выбери приложение, в котором будешь использовать конфиг:\n\n"
-    "• <b>qWDTT</b> — рекомендуемый вариант для Android.\n"
-    "• <b>WDTT</b> — подходит для Android и iPhone."
-)
+# ------------------------------------------------------------ доступ
 
 
-AGREEMENT_HEAD = "📜 <b>Соглашение</b>\n\n"
+def access_text(
+    user: dict,
+    live: dict,
+    links: list | None = None,
+    shown: int = 5,
+) -> str:
+    links = links or []
+    total_nodes = len(links)
+    password = (
+        live.get("password")
+        or user.get("panel_password")
+        or live.get("id")
+        or "—"
+    )
+
+    lines = [
+        "📱 <b>Мой доступ</b>",
+        "",
+        f"🔐 <code>{esc(password)}</code>",
+        traffic_line(live),
+        status_line(live),
+    ]
+
+    if total_nodes:
+        hidden = max(total_nodes - shown, 0)
+        tail = f" · {shown} кнопками" if hidden else ""
+        if hidden:
+            tail += f", {hidden} в подписке"
+        lines += ["", f"🌍 Ноды: <b>{total_nodes}</b>{tail}"]
+
+    return "\n".join(lines)
 
 
-HASH_HELP = (
-    "🔗 <b>VK-хеш звонка</b>\n\n"
-    "<blockquote>"
-    "VK-хеш — часть ссылки на звонок вида:\n"
-    "<code>https://vk.com/call/join/XXXXXXXXXX</code>\n"
-    "или просто <code>XXXXXXXXXX</code> после /join/.\n\n"
-    "<b>Как взять:</b>\n"
-    "1️⃣ VK → Мессенджер → Звонки → «+» → «Создать звонок»\n"
-    "2️⃣ Скопируй ссылку (или хеш после /join/)"
-    "</blockquote>"
-)
+def sub_text(user: dict, live: dict, links: list | None = None) -> str:
+    sub_url = live.get("subscription_url") or user.get("subscription_url") or ""
+    sub_id = live.get("sub_id") or user.get("sub_id") or "—"
+
+    lines = [
+        "📦 <b>Подписка</b>",
+        "",
+        f"🆔 <code>{esc(sub_id)}</code>",
+        traffic_line(live),
+        status_line(live),
+    ]
+
+    if links:
+        lines.append(f"🌍 Нод в подписке: <b>{len(links)}</b>")
+
+    if sub_url:
+        lines += ["", f"<code>{esc(sub_url)}</code>"]
+
+    return "\n".join(lines)
 
 
-def hash_intro(app_name: str = "WDTT") -> str:
+def node_link_text(index: int, link: str, name: str = "") -> str:
+    title = f" · {esc(name)}" if name else ""
     return (
-        "—— <b>Шаг 2 из 3 — VK-хеши</b> ——\n\n"
-        f"✅ <b>Выбрано приложение:</b> {esc(app_name)}\n\n"
-        "🔗 <b>Добавь VK-хеш звонка</b>\n\n"
-        "<blockquote>"
-        "VK-хеш — это часть ссылки на звонок. Он нужен приложению для "
-        "подключения через серверы VK.\n\n"
-        "Пришли полную ссылку или только хеш после <code>/join/</code>:\n"
-        "• <code>https://vk.com/call/join/XXXXXXXXXX</code>\n"
-        "• <code>XXXXXXXXXX</code>\n\n"
-        "Одного хеша достаточно. Дополнительные хеши могут повысить "
-        "стабильность и скорость. Можно добавить до четырёх."
-        "</blockquote>"
+        f"🔗 <b>Ссылка{title}</b>\n\n"
+        f"<code>{esc(link)}</code>\n\n"
+        "Нажми на ссылку, чтобы скопировать."
     )
 
 
-def hash_added_text(hashes: list, max_h: int = 4) -> str:
-    n = len(hashes)
-    left = max(max_h - n, 0)
-
-    tail = ", ".join(h[-4:] for h in hashes) or "—"
-
-    if n >= max_h:
-        return (
-            "—— <b>Шаг 2 из 3 — VK-хеши</b> ——\n\n"
-            f"✅ <b>Добавлено {n}/{max_h} — максимум.</b>"
-        )
-
+def agree_text(settings: dict) -> str:
     return (
-        "—— <b>Шаг 2 из 3 — VK-хеши</b> ——\n\n"
-        f"✅ <b>Хеш добавлен ({n}/{max_h}).</b>\n\n"
-        f"<blockquote>"
-        "Одного хеша достаточно. Можно добавить ещё "
-        f"<b>{left}</b> для повышения стабильности и скорости.\n"
-        f"Добавленные (последние 4 симв.): "
-        f"<code>{esc(tail)}</code>"
-        f"</blockquote>"
+        "📜 <b>Соглашение</b>\n\n"
+        + quote(settings.get("agreement_text") or DEFAULT_AGREEMENT)
+        + "\n\nНажми «Принимаю», чтобы создать доступ."
     )
 
-
-# ------------------------------------------------------ готовый конфиг
 
 def done_text(
     password: str,
     limit_gb: int,
     dev: int,
-    app: str,
-    hashes: list,
+    app: str = "WDTT",
+    hashes: list | None = None,
     sub_url: str = "",
     wdtt_link: str = "",
     ios_link: str = "",
     android_link: str = "",
 ) -> str:
-    """Финальный экран «Шаг 3 — готово».
-
-    Сразу показывает WDTT-ссылки для iOS и Android (не «ссылку из словаря»).
-    """
+    """Совместимость со старым флоу."""
     lines = [
-        "—— <b>Шаг 3 из 3 — готово</b> ——\n",
-        "✅ <b>Доступ создан!</b>\n",
-        f"🔐 Пароль: <code>{esc(password)}</code>",
-        f"📊 Лимит: <b>{limit_gb or '∞'} ГБ</b>/мес",
-        "👥 За каждого друга: +5 ГБ",
-        f"📱 Формат: <b>{esc(app_caption(app))}</b>",
+        "✅ <b>Доступ создан</b>",
         "",
-        f"📌 VK хеши ({len(hashes)}):",
+        f"🔐 <code>{esc(password)}</code>",
+        f"📊 <b>{limit_gb or '∞'} ГБ</b> · 👥 {dev}",
     ]
 
-    for i, h in enumerate(hashes, 1):
-        lines.append(f"{i}. <code>{esc(h)}</code>")
-
-    lines += [
-        "",
-        f"⚠️ Только для {max(dev, 1)} устройства.",
-    ]
-
-    # Сразу выводим WDTT-ссылки iOS + Android (не «ссылку из словаря»).
     if android_link:
-        lines += [
-            "",
-            "🤖 <b>WDTT — Android</b>",
-            f"<code>{esc(android_link)}</code>",
-        ]
+        lines += ["", "🤖 Android", f"<code>{esc(android_link)}</code>"]
+    elif wdtt_link:
+        lines += ["", f"<code>{esc(wdtt_link)}</code>"]
 
     if ios_link:
-        lines += [
-            "",
-            "🍏 <b>WDTT — iOS</b>",
-            f"<code>{esc(ios_link)}</code>",
-        ]
+        lines += ["", "🍏 iOS", f"<code>{esc(ios_link)}</code>"]
 
-    lines += [
-        "",
-        "Нажми «Показать ссылку» и открой её в выбранном приложении.",
-    ]
+    if sub_url:
+        lines += ["", "📦 Подписка", f"<code>{esc(sub_url)}</code>"]
 
     return "\n".join(lines)
 
 
-# ------------------------------------------------------ трафик
-
-def _fmt_size(b) -> str:
-    try:
-        b = float(b or 0)
-    except (TypeError, ValueError):
-        return "0 Б"
-
-    if b < 1024:
-        return f"{int(b)} Б"
-
-    for unit in ("КБ", "МБ", "ГБ"):
-        b /= 1024
-        if b < 1024 or unit == "ГБ":
-            return f"{b:.1f} {unit}"
-
-    return f"{b:.1f} ГБ"
+# ------------------------------------------------------------ кабинет
 
 
-def traffic_bar(used_bytes, total_gb) -> tuple[str, str, int]:
-    try:
-        total_b = float(total_gb or 0) * 1024 ** 3
-        used_b = float(used_bytes or 0)
-    except (TypeError, ValueError):
-        total_b, used_b = 0.0, 0.0
+def profile_text(user: dict) -> str:
+    username = f"@{esc(user['username'])}" if user.get("username") else "—"
+    lines = [
+        "👤 <b>Профиль</b>",
+        "",
+        f"ID: <code>{user.get('tg_id')}</code>",
+        f"Имя: <b>{_name(user)}</b>",
+        f"Username: {username}",
+        f"Регистрация: {'есть' if user.get('registered') else 'нет'}",
+        f"Приглашено: <b>{int(user.get('referrals') or 0)}</b>",
+    ]
 
-    pct = (
-        int(min(used_b / total_b * 100, 100))
-        if total_b
-        else 0
+    if user.get("registered"):
+        data = _snapshot(user)
+        if data.get("total_gb") or data.get("traffic_used_bytes"):
+            lines += ["", traffic_line(data)]
+
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------ инструкция
+
+
+def help_text() -> str:
+    return (
+        "🏳️ <b>Подключение</b>\n\n"
+        "1. Установи приложение для своей платформы.\n"
+        "2. Открой «Мой доступ» и скопируй ссылку ноды.\n"
+        "3. Вставь ссылку в приложение и подключись.\n\n"
+        "Если нод несколько — скопируй любую. Все ноды ведут в один VPN."
     )
 
-    filled = max(min(pct // 10, 10), 0)
-    bar = "[" + "█" * filled + "░" * (10 - filled) + "]"
 
-    return bar, _fmt_size(used_b), pct
+# ------------------------------------------------------------ совместимость
 
 
-# ------------------------------------------------------ конфиг
-
-def wdtt_configs(
-    live: dict,
-    hashes: list,
-    host: str = "",
-) -> dict:
-    """Возвращает WDTT-конфиги для iOS и Android (порт клиента разный).
-
-    Форматы (как в панели):
-      iOS — VK Turn Proxy:  wdtt://IP:dtls:wg:0:pwd:hash
-      Android — WDTT:       wdtt://IP:dtls:wg:lp:pwd:hash
-
-    host — хост панели (без порта и пути). Если не передан, берётся
-    из live["server_host"], иначе пустой.
-    """
+def wdtt_configs(live: dict, hashes: list | None = None, host: str = "") -> dict:
+    """Старый формат ссылок. Нужен только как fallback."""
     if not host:
         host = live.get("server_host") or live.get("server_ip") or ""
     dtls = live.get("dtls_port") or 0
     wg = live.get("wg_port") or 0
     lp = live.get("client_port") or 0
-    pwd = live.get("password_key") or ""
+    pwd = live.get("password_key") or live.get("password") or ""
     vk = ",".join(h for h in (hashes or []) if h) or "VK_HASH"
 
-    ios = f"wdtt://{host}:{dtls}:{wg}:0:{pwd}:{vk}"
-    android = f"wdtt://{host}:{dtls}:{wg}:{lp}:{pwd}:{vk}"
-
     return {
-        "ios": ios,
-        "android": android,
+        "ios": f"wdtt://{host}:{dtls}:{wg}:0:{pwd}:{vk}",
+        "android": f"wdtt://{host}:{dtls}:{wg}:{lp}:{pwd}:{vk}",
     }
 
 
 def config_text(
     live: dict,
-    hashes: list,
+    hashes: list | None = None,
     app: str = "WDTT",
     created_at=None,
     include_links: bool = True,
     host: str = "",
 ) -> str:
-    pwd = live.get("password_key") or live.get("password") or "—"
-    total_gb = live.get("total_gb") or 0
-    sub_url = live.get("sub_url") or ""
-
-    bar, used_s, pct = traffic_bar(
-        live.get("traffic_used"),
-        total_gb,
-    )
-
-    total_s = f"{float(total_gb):.2f} ГБ" if total_gb else "∞"
-    vk = (
-        hashes[0] + ("…" if len(hashes) > 1 else "")
-        if hashes
-        else "—"
-    )
-
+    """Совместимость: карточка доступа из данных панели."""
+    password = live.get("password") or live.get("password_key") or "—"
     lines = [
-        "🔑 <b>Твой конфиг</b>\n",
-        "<blockquote>",
-        f"📱 Формат: <b>{esc(app_caption(app))}</b>",
-        f"🔐 Пароль: <code>{esc(pwd)}</code>",
-        f"🔗 VK Хеш: <code>{esc(vk)}</code>",
-        "📅 Истекает: ♾️ бессрочный",
+        "📱 <b>Мой доступ</b>",
         "",
-        f"📊 Трафик: {esc(used_s)} / {esc(total_s)} "
-        f"{bar} {pct}%",
-        "</blockquote>",
+        f"🔐 <code>{esc(password)}</code>",
+        traffic_line(live),
+        status_line(live),
     ]
 
     if include_links:
-        cfg = wdtt_configs(live, hashes, host=host)
-
-        if sub_url:
-            lines += [
-                "",
-                "🌐 <b>Подписка (ссылкa):</b>",
-                f"<code>{esc(sub_url)}</code>",
-            ]
-
-        lines += [
-            "",
-            "📱 <b>WDTT — Android</b>",
-            f"<code>{esc(cfg['android'])}</code>",
-            "",
-            "🍏 <b>WDTT — iOS</b>",
-            f"<code>{esc(cfg['ios'])}</code>",
-        ]
+        link = live.get("link") or live.get("subscription_url") or ""
+        if link:
+            lines += ["", f"<code>{esc(link)}</code>"]
 
     return "\n".join(lines)
 
 
-# ------------------------------------------------------ подписка
-
-def sub_text(
+def sub_text_legacy(
     live: dict,
-    hashes: list,
+    hashes: list | None = None,
     app: str = "WDTT",
 ) -> str:
-    sub_url = live.get("sub_url") or ""
-    sub_id = live.get("sub_id") or "—"
+    return sub_text({}, live, [])
 
-    total_gb = live.get("total_gb") or 0
 
-    bar, used_s, pct = traffic_bar(
-        live.get("traffic_used"),
-        total_gb,
-    )
+def hash_intro(app_name: str = "WDTT") -> str:
+    return agree_text({})
 
-    total_s = f"{float(total_gb):.2f} ГБ" if total_gb else "∞"
 
-    status = ("🟢 активна" if live.get("active", True)
-              else "⏸ приостановлена")
-    online = "🟢 в сети" if live.get("online") else "⚪ не в сети"
-    expires = live.get("expires") or "бессрочно"
+def hash_added_text(hashes: list | None = None, max_h: int = 4) -> str:
+    return "✅ VK-хеши больше не нужны — панель выдаёт готовую ссылку."
 
-    lines = [
-        "📄 <b>Информация о подписке</b>\n",
-        f"🆔 ID подписки: <code>{esc(sub_id)}</code>",
-        f"Статус: <b>{status}</b>",
-        f"📡 Онлайн: <b>{online}</b>",
-        f"📊 Использовано: {esc(used_s)}",
-        f"💾 Общий лимит: {esc(total_s)}",
-        f"⏰ Срок действия: {esc(expires)}",
-        "",
-    ]
 
-    if sub_url:
-        lines += [
-            "🌐 <b>Подписка URL</b>",
-            f"<code>{esc(sub_url)}</code>",
-            "",
-        ]
+HASH_HELP = "🔗 Ссылки выдаёт панель автоматически."
+STEP_APP = "📱 Нажми «Продолжить», чтобы создать доступ."
+AGREEMENT_HEAD = "📜 <b>Соглашение</b>\n\n"
 
-    return "\n".join(lines)
+
+# Для удобства внешних вызовов
+__all__ = [
+    "esc", "quote", "DEFAULT_APP_LINKS", "DEFAULT_AGREEMENT",
+    "traffic_line", "menu_text", "no_config_text", "no_slots_text",
+    "panel_down_text", "config_missing_text", "access_text", "sub_text",
+    "node_link_text", "agree_text", "done_text", "profile_text",
+    "help_text", "wdtt_configs", "config_text", "sub_text_legacy",
+    "hash_intro", "hash_added_text", "HASH_HELP", "STEP_APP",
+    "AGREEMENT_HEAD", "human_bytes",
+]

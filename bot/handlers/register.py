@@ -1,665 +1,284 @@
-
 # -*- coding: utf-8 -*-
-"""Флоу регистрации: приложение → соглашение → VK-хеши → готово (подписка).
-
-Листательный flow: бот-сообщение редактируется по кнопкам;
-ввод VK-хешей — новыми сообщениями в состоянии (FSM).
-"""
+"""Создание доступа, экраны «Мой доступ» и «Подписка»."""
+from __future__ import annotations
 
 import logging
+import time
 
 from aiogram import F, Router
-from aiogram.filters import StateFilter
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery
 
 from ..context import app
 from ..db import utcnow
 from ..keyboards import (
+    access_kb,
     agreement_kb,
     config_missing_kb,
-    done_kb,
-    hash_added_kb,
-    hash_help_kb,
-    hash_prompt_kb,
     no_config_kb,
     panel_down_kb,
     show_link_kb,
-    step_app_kb,
-    config_kb,
     sub_kb,
 )
+from ..services import (
+    access_links,
+    as_int,
+    fetch_live,
+    node_limit,
+    refresh_snapshot,
+    _by_tg,
+)
 from ..texts import (
-    AGREEMENT_HEAD,
-    HASH_HELP,
-    STEP_APP,
+    access_text,
+    agree_text,
     config_missing_text,
-    config_text,
-    done_text,
-    hash_added_text,
-    hash_intro,
     no_config_text,
     no_slots_text,
+    node_link_text,
     panel_down_text,
     sub_text,
-    wdtt_configs,
 )
-from ..utils import answer_or_alert, extract_vk_hash, safe_edit
-from ..wdtt import WdttError
-
+from ..utils import answer_or_alert, yes_no_kb
+from ..wdtt import WdttError, online_flag
 
 log = logging.getLogger(__name__)
-router = Router(name="register")
-
-MAX_HASHES = 4
+router = Router(name="access")
 
 
-class RegStates(StatesGroup):
-    hash = State()
-
-
-async def _settings_and_slots():
+async def _slots_ok() -> tuple[dict, bool]:
     ctx = app()
     settings = await ctx.db.get_settings()
     ok, _left = await ctx.db.slots_available(settings)
     return settings, ok
 
 
-async def _edit_loading(cb: CallbackQuery, step: int = 0):
-    """Анимирует «загрузку» на редактируемом сообщении перед запросом к серверу."""
+async def _nodes() -> list:
+    try:
+        return await app().wdtt.list_nodes()
+    except Exception as e:
+        log.debug("nodes unavailable: %s", e)
+        return []
+
+
+async def render_access(
+    cb: CallbackQuery,
+    user: dict,
+    force: bool = True,
+    fallback: dict | None = None,
+):
+    """Единый экран доступа: трафик + кнопки копирования нод.
+
+    ``fallback`` — данные, полученные при создании доступа. Нужны, чтобы
+    пользователь сразу увидел ключ, даже если повторный запрос к панели
+    не удался.
+    """
     if not cb.message:
         return
-    frames = ["⏳", "🔄", "⏳"]
-    emoji = frames[step % len(frames)]
-    try:
-        await cb.message.edit_text(
-            f"{emoji} <b>Загружаю…</b>\n\n"
-            "Подожди, подключаюсь к серверу…"
-        )
-    except Exception:
-        pass
 
-
-async def _show_no_config(cb: CallbackQuery):
-    """Экран «нет конфига» — для незарегистрированных."""
-    if cb.message:
-        await safe_edit(
-            cb.message,
-            no_config_text(),
-            no_config_kb(),
-        )
-
-    await answer_or_alert(cb)
-
-
-async def _resolve_live(user: dict):
-    """Ищет конфиг пользователя в зеркале панели (локально, без сети).
-
-    Возвращает ``(live|None, reason)``:
-      • ``'ok'``         — конфиг найден;
-      • ``'panel_down'`` — холодный старт и панель недоступна;
-      • ``'missing'``    — зеркало отвечает, но конфига у пользователя нет.
-
-    Ключи: пароль и ``tg<id>`` (комментарий в панели). Панель в горячем
-    пути НЕ опрашивается — свежесть даёт стартовый прогрев + часовой sync.
-    """
-    ctx = app()
-    tg_id = user.get("tg_id")
-    pwd = user.get("wdtt_password") or ""
-
-    # Запасной ключ: панель хранит комментарий как "tg<id>" (см. регистрацию).
-    candidates = [c for c in (pwd, f"tg{tg_id}" if tg_id else "") if c]
-
-    # 1) Быстрый путь: in-memory кэш / зеркало Mongo — без запроса к панели.
-    for key in candidates:
-        live = await ctx.wdtt.find_user(key)
-
-        if live:
-            return live, "ok"
-
-    # 2) Холодный старт (кэш ни разу не грузился — прогрев не удался):
-    #    ровно ОДИН запрос, чтобы отличить сбой панели от отсутствия.
-    if not ctx.wdtt.cache_ready:
-        try:
-            await ctx.wdtt.get_users(force=True)
-        except WdttError:
-            return None, "panel_down"
-
-        for key in candidates:
-            live = await ctx.wdtt.find_user(key)
-
-            if live:
-                return live, "ok"
-
-    return None, "missing"
-
-
-async def _show_live_problem(cb: CallbackQuery, reason: str):
-    """Корректный экран, когда конфиг не удалось получить."""
-    if not cb.message:
-        return await answer_or_alert(cb)
-
-    if reason == "panel_down":
-        await safe_edit(cb.message, panel_down_text(), panel_down_kb())
-        return await answer_or_alert(
-            cb, "🔌 Панель недоступна, попробуй позже", True)
-
-    await safe_edit(
-        cb.message, config_missing_text(), config_missing_kb())
-    return await answer_or_alert(cb, "Конфиг не найден в панели", True)
-
-
-@router.callback_query(F.data == "u:traffic")
-async def cb_traffic(cb: CallbackQuery, user: dict):
-    """Трафик: зарегистрированным — конфиг + ссылки для копирования.
-
-    Кнопка «Трафик» в меню показывает:
-      • инфо о конфиге (пароль, VK, трафик);
-      • ссылку подписки;
-      • WDTT-конфиги для копирования (iOS и Android).
-    """
-    if not cb.message:
-        return await answer_or_alert(cb)
+    user = dict(user or {})
 
     if not user.get("registered"):
-        return await _show_no_config(cb)
+        await cb.message.edit_text(no_config_text(), reply_markup=no_config_kb())
+        return
 
-    live, reason = await _resolve_live(user)
+    live, reason = await refresh_snapshot(user, force=force, timeout=12)
 
-    if live is None:
-        return await _show_live_problem(cb, reason)
+    if live is None and fallback:
+        live = fallback
+    elif live is None:
+        if reason == "panel_down":
+            await cb.message.edit_text(
+                config_missing_text() if not user.get("panel_id")
+                else panel_down_text(),
+                reply_markup=panel_down_kb(),
+            )
+        elif reason in ("missing", "no_link"):
+            await cb.message.edit_text(
+                config_missing_text(), reply_markup=config_missing_kb()
+            )
+        else:
+            await cb.message.edit_text(
+                no_config_text(), reply_markup=no_config_kb()
+            )
+        return
 
-    hashes = user.get("sub_vk_hashes") or (
-        [live["vk_hash"]]
-        if live.get("vk_hash")
-        else []
-    )
+    settings = await app().db.get_settings()
+    shown = node_limit(settings)
+    nodes = await _nodes()
+    links = access_links(live, nodes)
+    sub_url = live.get("subscription_url") or user.get("subscription_url") or ""
 
-    app_name = user.get("sub_app") or "WDTT"
+    text = access_text(user, live, links, shown)
+    kb = access_kb(links, sub_url=sub_url, shown=shown, total_nodes=len(links))
+    await cb.message.edit_text(text, reply_markup=kb)
 
-    cfg = wdtt_configs(live, hashes, host=app().cfg.host)
 
-    text = config_text(
-        live,
-        hashes,
-        app_name,
-        host=app().cfg.host,
-    )
-    kb = config_kb(
-        sub_url=live.get("sub_url") or "",
-        ios_link=cfg["ios"],
-        android_link=cfg["android"],
-    )
+@router.callback_query(F.data == "u:access")
+async def cb_access(cb: CallbackQuery, user: dict | None = None):
+    if not cb.message:
+        return await answer_or_alert(cb)
 
-    await safe_edit(cb.message, text, kb)
+    await render_access(cb, user or {}, force=True)
     await answer_or_alert(cb)
 
 
 @router.callback_query(F.data == "u:sub")
-async def cb_sub(cb: CallbackQuery, user: dict):
-    """Экран «Подписка»: инфо о подписке + все форматы ссылок."""
+async def cb_sub(cb: CallbackQuery, user: dict | None = None):
     if not cb.message:
         return await answer_or_alert(cb)
 
+    user = dict(user or {})
     if not user.get("registered"):
-        return await _show_no_config(cb)
+        await cb.message.edit_text(no_config_text(), reply_markup=no_config_kb())
+        return await answer_or_alert(cb)
 
-    live, reason = await _resolve_live(user)
+    live, reason = await refresh_snapshot(user, force=True, timeout=12)
 
     if live is None:
-        return await _show_live_problem(cb, reason)
+        if reason == "missing":
+            await cb.message.edit_text(
+                config_missing_text(), reply_markup=config_missing_kb()
+            )
+        else:
+            await cb.message.edit_text(
+                panel_down_text(), reply_markup=panel_down_kb()
+            )
+        return await answer_or_alert(cb)
 
-    hashes = user.get("sub_vk_hashes") or (
-        [live["vk_hash"]]
-        if live.get("vk_hash")
-        else []
+    settings = await app().db.get_settings()
+    shown = node_limit(settings)
+    nodes = await _nodes()
+    links = access_links(live, nodes)
+    sub_url = live.get("subscription_url") or user.get("subscription_url") or ""
+
+    await cb.message.edit_text(
+        sub_text(user, live, links),
+        reply_markup=sub_kb(sub_url, links, shown),
     )
+    await answer_or_alert(cb)
 
-    app_name = user.get("sub_app") or "WDTT"
 
-    text = sub_text(
-        live,
-        hashes,
-        app_name,
+@router.callback_query(F.data.startswith("u:show:"))
+async def cb_show_link(cb: CallbackQuery, user: dict | None = None):
+    if not cb.message:
+        return await answer_or_alert(cb)
+
+    try:
+        idx = int(cb.data.removeprefix("u:show:"))
+    except ValueError:
+        return await answer_or_alert(cb, "Ссылка не найдена", True)
+
+    user = dict(user or {})
+    live, reason = await refresh_snapshot(user, force=True, timeout=12)
+
+    if live is None:
+        return await answer_or_alert(cb, "Панель недоступна", True)
+
+    links = access_links(live, await _nodes())
+
+    if idx < 0 or idx >= len(links):
+        return await answer_or_alert(cb, "Ссылка не найдена", True)
+
+    item = links[idx]
+    await cb.message.edit_text(
+        node_link_text(idx, item.get("link") or "", item.get("name") or ""),
+        reply_markup=show_link_kb(),
     )
-    kb = sub_kb(
-        live.get("sub_url") or ""
-    )
-
-    await safe_edit(cb.message, text, kb)
     await answer_or_alert(cb)
 
 
 @router.callback_query(F.data == "u:reg")
-async def cb_reg_start(
-    cb: CallbackQuery,
-    user: dict,
-    state: FSMContext,
-):
+async def cb_reg_start(cb: CallbackQuery, user: dict | None = None):
     if not cb.message:
         return await answer_or_alert(cb)
 
-    recreate = False
+    user = dict(user or {})
 
     if user.get("registered"):
-        # Пересоздание разрешаем ТОЛЬКО если в панели конфига реально нет.
-        # Иначе получался тупик: «нет конфига» ↔ «у тебя уже есть конфиг».
-        _live, reason = await _resolve_live(user)
+        live, reason = await fetch_live(user, force=True, timeout=8)
 
         if reason == "ok":
-            return await answer_or_alert(
-                cb,
-                "У тебя уже есть конфиг",
-            )
+            await render_access(cb, user, force=False)
+            return await answer_or_alert(cb, "Доступ уже создан")
 
         if reason == "panel_down":
             return await answer_or_alert(
-                cb,
-                "🔌 Панель недоступна, попробуй позже",
-                True,
+                cb, "Панель недоступна, попробуй позже", True
             )
 
-        # reason == "missing" — подписки в панели нет, создаём заново.
-        recreate = True
+        # missing / no_link — разрешаем пересоздать.
+        settings, ok = await _slots_ok()
+        if not ok:
+            return await answer_or_alert(cb, "Свободных мест нет", True)
 
-    settings, ok = await _settings_and_slots()
+        await cb.message.edit_text(
+            agree_text(settings), reply_markup=agreement_kb("u:agree:r")
+        )
+        return await answer_or_alert(cb)
 
+    settings, ok = await _slots_ok()
     if not ok:
-        await app().db.log_event(
-            cb.from_user.id,
-            "reg_denied_no_slots",
-        )
-
-        await safe_edit(
-            cb.message,
-            no_slots_text(),
-            no_config_kb(),
-        )
-
+        await cb.message.edit_text(no_slots_text(), reply_markup=no_config_kb())
         return await answer_or_alert(cb)
 
-    await state.clear()
-
-    await state.update_data(
-        app="WDTT",
-        hashes=[],
-        recreate=recreate,
+    await cb.message.edit_text(
+        agree_text(settings), reply_markup=agreement_kb("u:agree")
     )
-
-    await safe_edit(
-        cb.message,
-        STEP_APP,
-        step_app_kb(),
-    )
-
     await answer_or_alert(cb)
 
 
-@router.callback_query(F.data.startswith("u:app:"))
-async def cb_pick_app(
-    cb: CallbackQuery,
-    state: FSMContext,
-):
+async def _find_existing(tg_id: int) -> dict | None:
+    """Если пользователь уже есть в панели — переиспользуем его."""
+    return await _by_tg(tg_id)
+
+
+@router.callback_query(F.data.in_({"u:agree", "u:agree:r"}))
+async def cb_agree(cb: CallbackQuery, user: dict | None = None):
     if not cb.message:
         return await answer_or_alert(cb)
 
-    chosen = cb.data.removeprefix("u:app:")
-
-    data = await state.get_data()
-
-    # В режиме пересоздания (панель потеряла конфиг) не блокируем.
-    if not data.get("recreate"):
-        u = await app().db.get_user(
-            cb.from_user.id
-        ) or {}
-
-        if u.get("registered"):
-            return await answer_or_alert(
-                cb,
-                "У тебя уже есть конфиг",
-            )
-
-    await state.update_data(app=chosen)
-
-    settings, _ = await _settings_and_slots()
-
-    text = (
-        AGREEMENT_HEAD
-        + (settings.get("agreement_text") or "")
-    )
-
-    await safe_edit(
-        cb.message,
-        text,
-        agreement_kb(),
-    )
-
-    await answer_or_alert(cb)
-
-
-@router.callback_query(F.data == "u:agree:ok")
-async def cb_agree_ok(
-    cb: CallbackQuery,
-    state: FSMContext,
-):
-    if not cb.message:
-        return await answer_or_alert(cb)
-
-    data = await state.get_data()
-    app_name = data.get("app") or "WDTT"
-
-    await state.update_data(
-        hashes=[],
-    )
-
-    await state.set_state(RegStates.hash)
-
-    await safe_edit(
-        cb.message,
-        hash_intro(app_name),
-        hash_prompt_kb(),
-    )
-
-    await answer_or_alert(cb)
-
-
-@router.message(StateFilter(RegStates.hash), F.text)
-async def h_hash_input(
-    message: Message,
-    state: FSMContext,
-):
-    """
-    Принимаем VK-хеш обычным сообщением.
-
-    ВАЖНО:
-    сообщение пользователя не редактируется;
-    старое сообщение бота тоже не редактируется.
-
-    Каждый успешно добавленный хеш приводит к отправке
-    нового сообщения бота со свежим списком.
-    """
     ctx = app()
-
-    data = await state.get_data()
-    hashes = list(data.get("hashes") or [])
-
-    raw = (message.text or "").strip()
-    hash_ = extract_vk_hash(raw)
-
-    # Невалидный хеш — просто новое сообщение бота.
-    if not hash_:
-        try:
-            await message.answer(
-                "⚠️ Не получилось распознать хеш.\n\n"
-                "<blockquote>"
-                "Пришли полную ссылку на звонок:\n"
-                "<code>https://vk.ru/call/join/XXXXXXXXXX</code>\n"
-                "или только хеш после <code>/join/</code>."
-                "</blockquote>"
-            )
-        except Exception:
-            pass
-
-        await ctx.db.log_event(
-            message.from_user.id,
-            "hash_invalid",
-            raw[:60],
-        )
-        return
-
-    # Дубликат — тоже новое сообщение.
-    if hash_ in hashes:
-        try:
-            await message.answer(
-                "⚠️ Этот хеш уже добавлен.\n\n"
-                "Пришли другой.",
-                reply_markup=hash_added_kb(
-                    hashes,
-                    MAX_HASHES,
-                ),
-            )
-        except Exception:
-            pass
-
-        return
-
-    # Добавляем новый хеш.
-    hashes.append(hash_)
-
-    await state.update_data(
-        hashes=hashes,
-    )
-
-    # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ:
-    # здесь НЕТ safe_edit / edit_message_text.
-    # Всегда создаём новое сообщение.
-    try:
-        await message.answer(
-            hash_added_text(
-                hashes,
-                MAX_HASHES,
-            ),
-            reply_markup=hash_added_kb(
-                hashes,
-                MAX_HASHES,
-            ),
-        )
-    except Exception as e:
-        log.warning(
-            "failed to send hash status: %s",
-            e,
-        )
-
-    await ctx.db.log_event(
-        message.from_user.id,
-        "vk_hash_added",
-        hash_,
-    )
-
-
-@router.callback_query(F.data.startswith("u:hash:rm:"))
-async def cb_hash_remove(
-    cb: CallbackQuery,
-    state: FSMContext,
-):
-    """Удаление хеша по кнопке."""
-    if not cb.message:
-        return await answer_or_alert(cb)
-
-    data = await state.get_data()
-
-    target = cb.data.removeprefix(
-        "u:hash:rm:"
-    )
-
-    hashes = [
-        h
-        for h in (data.get("hashes") or [])
-        if h != target
-    ]
-
-    await state.update_data(
-        hashes=hashes,
-    )
-
-    if not hashes:
-        app_name = data.get("app") or "WDTT"
-
-        await state.set_state(
-            RegStates.hash
-        )
-
-        # Это нажатие кнопки → редактирование уместно.
-        await safe_edit(
-            cb.message,
-            hash_intro(app_name),
-            hash_prompt_kb(),
-        )
-    else:
-        # Это нажатие кнопки → редактирование уместно.
-        await safe_edit(
-            cb.message,
-            hash_added_text(
-                hashes,
-                MAX_HASHES,
-            ),
-            hash_added_kb(
-                hashes,
-                MAX_HASHES,
-            ),
-        )
-
-    await answer_or_alert(
-        cb,
-        "Хеш удалён",
-    )
-
-
-@router.callback_query(F.data == "u:hash:add")
-async def cb_hash_add(
-    cb: CallbackQuery,
-    state: FSMContext,
-):
-    if not cb.message:
-        return await answer_or_alert(cb)
-
-    data = await state.get_data()
-    app_name = data.get("app") or "WDTT"
-
-    await state.set_state(
-        RegStates.hash
-    )
-
-    # Кнопка → редактируем текущее сообщение.
-    await safe_edit(
-        cb.message,
-        hash_intro(app_name),
-        hash_prompt_kb(),
-    )
-
-    await answer_or_alert(cb)
-
-
-@router.callback_query(F.data == "u:hash:help")
-async def cb_hash_help(cb: CallbackQuery):
-    if not cb.message:
-        return await answer_or_alert(cb)
-
-    # Кнопка → редактируем текущее сообщение.
-    await safe_edit(
-        cb.message,
-        HASH_HELP,
-        hash_help_kb(),
-    )
-
-    await answer_or_alert(cb)
-
-
-@router.callback_query(F.data == "u:hash:done")
-async def cb_hash_done(
-    cb: CallbackQuery,
-    state: FSMContext,
-):
-    """Создание подписки в панели WDTT + выдача подписки."""
-    if not cb.message:
-        return await answer_or_alert(cb)
-
-    data = await state.get_data()
-
-    app_name = data.get("app") or "WDTT"
-    hashes = list(data.get("hashes") or [])
     tg_id = cb.from_user.id
+    recreate = cb.data == "u:agree:r"
+    user_doc = dict(user or await ctx.db.get_user(tg_id) or {})
 
-    ctx = app()
+    if user_doc.get("registered") and not recreate:
+        return await answer_or_alert(cb, "Доступ уже создан")
 
-    u = await ctx.db.get_user(tg_id) or {}
-
-    recreate = bool(data.get("recreate"))
-
-    if not recreate and u.get("registered"):
-        await state.clear()
-
-        return await answer_or_alert(
-            cb,
-            "У тебя уже есть конфиг",
-            True,
-        )
-
-    settings, ok = await _settings_and_slots()
-
+    settings, ok = await _slots_ok()
     if not ok:
-        return await answer_or_alert(
-            cb,
-            "Свободных мест нет 😔",
-            True,
-        )
+        return await answer_or_alert(cb, "Свободных мест нет", True)
 
-    gb = int(
-        settings.get("default_total_gb") or 175
-    )
-
-    dev = int(
-        settings.get("default_max_devices") or 1
-    )
-
-    inviter = await _self_inviter(tg_id)
-
-    # Атомарный клейм: сбрасывает зависшие заявки старше 90 секунд
-    # (сбои/рестарты) и защищает от race condition при двойном нажатии.
     if not await ctx.db.claim_creating(tg_id, allow_recreate=recreate):
-        return await answer_or_alert(
-            cb,
-            "Подписка уже создаётся",
-            True,
-        )
+        return await answer_or_alert(cb, "Доступ уже создаётся", True)
+
+    gb = int(settings.get("default_total_gb") or 0)
+    devices = int(settings.get("default_max_devices") or 1)
+    days = int(settings.get("default_expires_days") or 0)
+    expires_at = int(time.time()) + days * 86400 if days > 0 else 0
+
+    panel_name = f"tg_{tg_id}"
 
     try:
-        log.info(
-            "[reg] create start tg=%s app=%s gb=%s dev=%s hashes=%s",
-            tg_id,
-            app_name,
-            gb,
-            dev,
-            len(hashes),
+        try:
+            created = await ctx.wdtt.create_user(
+                name=panel_name,
+                comment=f"tg{tg_id}",
+                total_gb=gb,
+                expires_at=expires_at,
+                max_devices=devices,
+            )
+        except WdttError as e:
+            existing = await _find_existing(tg_id)
+            if existing is None:
+                raise e
+            created = existing
+
+        panel_id = str(created.get("id") or panel_name)
+        password = str(created.get("password") or "")
+        sub_url = str(
+            created.get("subscription_url") or created.get("sub_url") or ""
         )
-
-        # Анимация загрузки перед запросами к панели.
-        await _edit_loading(cb, step=0)
-
-        password = await ctx.wdtt.add_user(
-            comment=f"tg{tg_id}",
-            total_gb=gb,
-            max_devices=dev,
-        )
-
-        log.info(
-            "[reg] panel add_user OK tg=%s",
-            tg_id,
-        )
-
-        # Вставляем нового пользователя в кэш/зеркало НАПРЯМУЮ —
-        # без парсинга всего списка панели (~35–40 секунд).
-        live = await ctx.wdtt.note_user_created(
-            password,
-            comment=f"tg{tg_id}",
-            total_gb=gb,
-            max_devices=dev,
-        )
-
-        sub_id = live.get("sub_id") or ""
-        sub_url = live.get("sub_url") or ""
-        wdtt_link = live.get("link") or ""
-
-        # WDTT-ссылки iOS + Android (из живых данных, не из «словаря»).
-        cfg = wdtt_configs(live, hashes, host=app().cfg.host)
-
-        log.info(
-            "[reg] sub ready tg=%s sub_id=%s link_len=%s",
-            tg_id,
-            sub_id,
-            len(wdtt_link),
-        )
+        link = str(created.get("link") or "")
 
         await ctx.db.users.update_one(
             {"tg_id": tg_id},
@@ -667,298 +286,172 @@ async def cb_hash_done(
                 "$set": {
                     "registered": True,
                     "creating": False,
-                    "wdtt_password": password,
-                    "wdtt_link": wdtt_link,
-                    "sub_id": sub_id,
-                    "sub_url": sub_url,
+                    "panel_id": panel_id,
+                    "panel_password": password,
+                    "panel_total_gb": gb,
+                    "panel_traffic_used_bytes": 0,
+                    "panel_expires_at": expires_at,
+                    "panel_max_devices": devices,
+                    "panel_devices_bound": as_int(
+                        created.get("devices_bound")
+                    ),
+                    "panel_online": online_flag(created.get("online")),
+                    "panel_active": True,
+                    "panel_status": "active",
+                    "panel_link": link,
+                    "subscription_url": sub_url,
+                    "sub_id": str(created.get("sub_id") or ""),
                     "sub_created_at": utcnow(),
                     "sub_total_gb": gb,
-                    "sub_max_devices": dev,
-                    "sub_app": app_name,
-                    "sub_vk_hashes": hashes,
-                    "referral_of": inviter,
+                    "sub_max_devices": devices,
+                    "panel_snapshot_at": utcnow(),
+                    "referral_credited": False,
                 },
                 "$unset": {"creating_at": ""},
             },
         )
 
         await ctx.db.log_event(
-            tg_id,
-            "subscription_created",
-            f"gb={gb} dev={dev} hashes={len(hashes)}",
+            tg_id, "access_created", f"gb={gb} dev={devices} days={days}"
         )
 
-        text = done_text(
-            password,
-            gb,
-            dev,
-            app_name,
-            hashes,
-            sub_url=sub_url,
-            wdtt_link=wdtt_link,
-            ios_link=cfg["ios"],
-            android_link=cfg["android"],
-        )
+        user_doc = await ctx.db.get_user(tg_id) or user_doc
+        fallback = dict(created) if isinstance(created, dict) else {}
+        fallback.setdefault("id", panel_id)
+        fallback.setdefault("password", password)
+        fallback.setdefault("total_gb", gb)
+        fallback.setdefault("traffic_used_bytes", 0)
+        fallback.setdefault("expires_at", expires_at)
+        fallback.setdefault("max_devices", devices)
+        fallback.setdefault("subscription_url", sub_url)
+        fallback.setdefault("link", link)
+        await render_access(cb, user_doc, force=True, fallback=fallback)
+        await answer_or_alert(cb, "✅ Доступ создан")
 
-        await state.clear()
-
-        # Завершение flow по кнопке → редактируем
-        # текущее сообщение.
-        await safe_edit(
-            cb.message,
-            text,
-            done_kb(
-                cfg["ios"],
-                cfg["android"],
-            ),
-        )
-
-        await answer_or_alert(
-            cb,
-            "🎉 Доступ создан!",
-        )
-
-        if inviter:
-            await _credit_inviter(inviter)
-
-        log.info(
-            "created subscription for %s",
-            tg_id,
-        )
+        inviter = _inviter(user_doc)
+        if inviter and inviter != tg_id:
+            await _credit_inviter(inviter, settings)
 
     except Exception as e:
         await ctx.db.release_creating(tg_id)
+        await ctx.db.log_event(tg_id, "access_failed", str(e)[:150])
+        log.exception("create access failed for %s", tg_id)
 
-        await ctx.db.log_event(
-            tg_id,
-            "subscription_failed",
-            str(e)[:150],
+        await cb.message.edit_text(
+            "❌ <b>Не удалось создать доступ</b>\n\n"
+            f"<code>{str(e)[:250]}</code>\n\n"
+            "Попробуй ещё раз через минуту.",
+            reply_markup=no_config_kb(),
         )
-
-        log.exception(
-            "create failed for %s",
-            tg_id,
-        )
-
-        err = (
-            "<b>Не удалось создать доступ</b>\n\n"
-            f"<code>{str(e)[:300]}</code>\n\n"
-            "Сервер панели недоступен. "
-            "Попробуй чуть позже."
-        )
-
-        # Ошибка возникла после нажатия кнопки,
-        # поэтому редактирование здесь нормально.
-        await safe_edit(
-            cb.message,
-            err,
-            hash_prompt_kb(),
-        )
-
-        await answer_or_alert(
-            cb,
-            "Ошибка создания",
-            True,
-        )
-
-
-@router.callback_query(F.data == "u:show")
-async def cb_show_link(
-    cb: CallbackQuery,
-    user: dict,
-):
-    """«Показать ссылку» — ссылка подписки для копирования."""
-    if not cb.message:
-        return await answer_or_alert(cb)
-
-    u = user or {}
-
-    link = (
-        u.get("wdtt_link")
-        or u.get("sub_url")
-        or ""
-    )
-
-    # Fallback: взять из кэша/зеркала панели (мгновенно, без сети).
-    if not link and u.get("wdtt_password"):
-        try:
-            live = await app().wdtt.find_user(u["wdtt_password"]) or {}
-        except Exception:  # noqa: BLE001
-            live = {}
-        link = live.get("link") or live.get("sub_url") or ""
-
-    if not link:
-        return await answer_or_alert(
-            cb,
-            "Ссылка ещё не создана",
-            True,
-        )
-
-    text = (
-        f"🔗 <b>Твоя ссылка:</b>\n\n"
-        f"<code>{link}</code>\n\n"
-        "Открой её в выбранном приложении."
-    )
-
-    await safe_edit(
-        cb.message,
-        text,
-        show_link_kb(),
-    )
-
-    await answer_or_alert(cb)
+        await answer_or_alert(cb, "Ошибка создания", True)
 
 
 @router.callback_query(F.data == "u:del1")
-async def cb_del_confirm(
-    cb: CallbackQuery,
-    user: dict,
-):
-    """Подтверждение удаления подписки."""
+async def cb_del_confirm(cb: CallbackQuery):
     if not cb.message:
         return await answer_or_alert(cb)
 
-    from ..utils import yes_no_kb
-
-    await safe_edit(
-        cb.message,
-        "🗑 <b>Удалить подписку?</b>\n\n"
-        "<blockquote>"
-        "Конфиг будет удалён из панели безвозвратно. "
-        "Создать новый можно будет позже."
-        "</blockquote>",
-        yes_no_kb(
-            None,
-            "u:del2",
-            "u:traffic",
-            "🗑 Да, удалить",
-            "❌ Отмена",
+    await cb.message.edit_text(
+        "🗑 <b>Удалить доступ?</b>\n\n"
+        "Пользователь и его ключи будут удалены из панели.",
+        reply_markup=yes_no_kb(
+            "", "u:del2", "u:access", "🗑 Удалить", "❌ Отмена"
         ),
     )
-
     await answer_or_alert(cb)
 
 
 @router.callback_query(F.data == "u:del2")
-async def cb_del_do(
-    cb: CallbackQuery,
-    user: dict,
-):
+async def cb_del_do(cb: CallbackQuery, user: dict | None = None):
     if not cb.message:
         return await answer_or_alert(cb)
 
     ctx = app()
-    pwd = user.get("wdtt_password")
+    user = dict(user or {})
+    panel_id = str(user.get("panel_id") or "")
 
     try:
-        if pwd:
-            await ctx.wdtt.delete_user(pwd)
+        if panel_id:
+            await ctx.wdtt.delete_user(panel_id)
+    except WdttError as e:
+        if e.status != 404:
+            log.warning("self delete failed: %s", e)
+            return await answer_or_alert(cb, "Не удалось удалить доступ в панели. Попробуй позже.", True)
     except Exception as e:
-        log.warning(
-            "self-delete failed: %s",
-            e,
-        )
+        log.warning("self delete failed: %s", e)
+        return await answer_or_alert(cb, "Не удалось удалить доступ в панели. Попробуй позже.", True)
 
     await ctx.db.users.update_one(
         {"tg_id": cb.from_user.id},
         {
-            "$set": {
-                "registered": False,
-            },
+            "$set": {"registered": False},
             "$unset": {
-                "wdtt_password": "",
-                "wdtt_link": "",
-                "sub_id": "",
-                "sub_url": "",
-                "sub_total_gb": "",
-                "sub_max_devices": "",
-                "sub_app": "",
-                "sub_vk_hashes": "",
+                "panel_id": "", "panel_password": "", "panel_link": "",
+                "panel_snapshot_at": "", "subscription_url": "", "sub_id": "",
+                "sub_total_gb": "", "sub_max_devices": "", "sub_created_at": "",
             },
         },
     )
+    await ctx.db.log_event(cb.from_user.id, "access_deleted", "self")
 
-    await ctx.db.log_event(
-        cb.from_user.id,
-        "subscription_deleted",
-        "self",
+    await cb.message.edit_text(
+        "🗑 Доступ удалён.\n\n" + no_config_text(),
+        reply_markup=no_config_kb(),
     )
-
-    await safe_edit(
-        cb.message,
-        "🗑 Подписка удалена.\n\n"
-        + no_config_text(),
-        no_config_kb(),
-    )
-
-    await answer_or_alert(
-        cb,
-        "🗑 Удалено",
-    )
+    await answer_or_alert(cb, "Удалено")
 
 
-async def _self_inviter(tg_id: int):
-    """Определяет, кто пригласил пользователя."""
+def _inviter(user_doc: dict) -> int | None:
     try:
-        u = await app().db.get_user(tg_id) or {}
-        payload = u.get("start_payload") or ""
+        if user_doc.get("referral_of"):
+            return int(user_doc["referral_of"])
 
+        payload = str(user_doc.get("start_payload") or "")
         if payload.startswith("ref_"):
-            return int(
-                payload[4:].split("_")[0]
-            )
-
+            return int(payload[4:].split("_")[0])
     except (ValueError, TypeError):
         return None
-
     return None
 
 
-async def _credit_inviter(inviter_id: int):
-    """+5 ГБ пригласившему."""
+async def _credit_inviter(inviter_id: int, settings: dict):
+    ctx = app()
+    inv = await ctx.db.get_user(inviter_id)
+
+    if not inv or not inv.get("registered"):
+        return
+
+    await ctx.db.users.update_one(
+        {"tg_id": inviter_id}, {"$inc": {"referrals": 1}}
+    )
+
+    bonus = int(
+        settings.get("referral_bonus_gb")
+        or ctx.cfg.referral_bonus_gb
+        or 0
+    )
+    panel_id = str(inv.get("panel_id") or "")
+    if bonus <= 0 or not panel_id:
+        return
+
     try:
-        ctx = app()
+        live = await ctx.wdtt.get_user(panel_id, force=True)
+    except Exception:
+        return
 
-        inv = (
-            await ctx.db.get_user(inviter_id)
-            or {}
-        )
+    current = int(live.get("total_gb") or 0)
+    if current <= 0:
+        return  # безлимит не трогаем
 
-        if not inv.get("registered"):
-            return
-
+    try:
+        await ctx.wdtt.update_user(panel_id, total_gb=current + bonus)
         await ctx.db.users.update_one(
             {"tg_id": inviter_id},
-            {"$inc": {"referrals": 1}},
+            {"$set": {"panel_total_gb": current + bonus,
+                      "sub_total_gb": current + bonus}},
         )
-
-        inv = (
-            await ctx.db.get_user(inviter_id)
-            or {}
+        await ctx.db.log_event(
+            inviter_id, "referral_bonus", f"+{bonus} GB"
         )
-
-        base = int(
-            inv.get("sub_total_gb") or 0
-        )
-
-        bonus = (
-            int(inv.get("referrals") or 0)
-            * 5
-        )
-
-        pwd = inv.get(
-            "wdtt_password",
-            "",
-        )
-
-        if pwd:
-            await ctx.wdtt.update_user(
-                pwd,
-                total_gb=base + bonus,
-            )
-
     except Exception as e:
-        log.warning(
-            "inviter credit failed: %s",
-            e,
-        )
+        log.warning("referral bonus failed: %s", e)

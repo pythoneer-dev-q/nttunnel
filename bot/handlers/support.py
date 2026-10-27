@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Поддержка: пользовательские тикеты."""
+"""Поддержка: обращения пользователей."""
+from __future__ import annotations
+
 import logging
 
 from aiogram import F, Router
@@ -24,24 +26,14 @@ class TicketStates(StatesGroup):
 
 HELP_TEXT = (
     "🆘 <b>Поддержка</b>\n\n"
-    "<blockquote>"
-    "Опиши проблему — оператор ответит в этом чате.\n"
-    "Для быстрой диагностики укажи:\n"
-    "• что делал;\n"
-    "• что ожидал;\n"
-    "• что получилось (скриншот/текст ошибки).\n"
-    "</blockquote>"
+    "Опиши проблему — ответ придёт в этот чат.\n\n"
+    "Полезно указать: что делал, что ожидал, текст ошибки."
 )
 
 
 @router.message(Command("support"))
 @router.callback_query(F.data == "u:support")
-async def open_support(event, user: dict):
-    """Открывает меню поддержки — как командой /support, так и кнопкой.
-
-    ВАЖНО: у Message нет атрибута ``message``, поэтому сначала
-    различаем тип события, иначе /support падал в answer_or_alert.
-    """
+async def open_support(event, user: dict | None = None):
     kb = support_kb()
 
     if isinstance(event, Message):
@@ -57,14 +49,14 @@ async def open_support(event, user: dict):
 
 @router.callback_query(F.data == "u:ticket:new")
 async def cb_ticket_start(cb: CallbackQuery, state: FSMContext):
-    """Начало создания тикета."""
     if not cb.message:
         return await answer_or_alert(cb)
+
     await state.set_state(TicketStates.wait_subject)
     await safe_edit(
         cb.message,
-        "📝 <b>Новый обращение</b>\n\n"
-        "<blockquote>Шаг 1 из 2 — кратко опиши тему (до 120 символов):</blockquote>",
+        "📝 <b>Новое обращение</b>\n\n"
+        "Шаг 1/2 — коротко опиши тему.",
         back_menu_kb(),
     )
     await answer_or_alert(cb)
@@ -75,11 +67,11 @@ async def h_ticket_subject(message: Message, state: FSMContext):
     subject = (message.text or "").strip()[:120]
     if not subject:
         return
+
     await state.update_data(subject=subject)
     await state.set_state(TicketStates.wait_body)
     await message.answer(
-        f"✅ Тема: <b>{esc(subject)}</b>\n\n"
-        "<blockquote>Шаг 2 из 2 — подробно опиши проблему:</blockquote>",
+        f"Тема: <b>{esc(subject)}</b>\n\nШаг 2/2 — опиши проблему подробнее.",
         reply_markup=back_menu_kb(),
     )
 
@@ -89,44 +81,52 @@ async def h_ticket_body(message: Message, state: FSMContext):
     body = (message.text or "").strip()[:2000]
     if not body:
         return
+
     data = await state.get_data()
     subject = data.get("subject", "")
     await state.clear()
 
-    ctx = app()
-    tid = await ctx.db.create_ticket(message.from_user.id, subject, body)
+    tid = await app().db.create_ticket(
+        message.from_user.id, subject, body
+    )
 
     await message.answer(
-        f"✅ <b>Обращение создано!</b>\n\n"
+        f"✅ <b>Обращение создано</b>\n\n"
         f"Номер: <code>{tid}</code>\n"
-        f"Тема: <b>{esc(subject)}</b>\n\n"
-        "Оператор ответит здесь же. Ожидай 🔔",
+        f"Тема: {esc(subject)}\n\n"
+        "Ответ придёт сюда.",
         reply_markup=back_menu_kb(),
     )
 
 
 @router.callback_query(F.data == "u:ticket:list")
-async def cb_ticket_list(cb: CallbackQuery, user: dict):
-    """Список активных тикетов пользователя."""
+async def cb_ticket_list(cb: CallbackQuery):
     if not cb.message:
         return await answer_or_alert(cb)
-    ctx = app()
-    tickets = await ctx.db.user_active_tickets(cb.from_user.id)
+
+    tickets = await app().db.user_active_tickets(cb.from_user.id)
+
     if not tickets:
         await safe_edit(
             cb.message,
-            "📭 <b>У тебя нет активных обращений.</b>",
+            "📭 <b>Активных обращений нет</b>",
             back_menu_kb(),
         )
         return await answer_or_alert(cb)
-    lines = []
-    for t in tickets:
-        status = {"open": "🟡 открыт", "in_progress": "🔵 в работе",
-                  "closed": "🟢 закрыт"}.get(t["status"], t["status"])
-        lines.append(f"• <code>{t['ticket_id']}</code> — {esc(t['subject'])} [{status}]")
+
+    statuses = {
+        "open": "🟡 открыт",
+        "in_progress": "🔵 в работе",
+        "closed": "🟢 закрыт",
+    }
+    lines = [
+        f"• <code>{t['ticket_id']}</code> — {esc(t.get('subject'))} "
+        f"[{statuses.get(t['status'], t['status'])}]"
+        for t in tickets
+    ]
     await safe_edit(
         cb.message,
-        "📬 <b>Твои обращения:</b>\n\n" + "\n".join(lines),
+        "📬 <b>Мои обращения</b>\n\n" + "\n".join(lines),
         back_menu_kb(),
     )
     await answer_or_alert(cb)

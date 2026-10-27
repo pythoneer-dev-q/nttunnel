@@ -54,7 +54,12 @@ async def cb_tickets_list(cb: CallbackQuery):
               f"adm:tkt:v{t['ticket_id']}") for t in chunk]
     text = (f"🎫 <b>Обращения</b> — всего {len(tickets)}\n\n"
             + (f"Стр. {page + 1}/{pages}" if pages > 1 else ""))
-    await safe_edit(cb.message, text, build_page_kb("adm:tkt", page, pages, items))
+    kb = build_page_kb("adm:tkt", page, pages, items)
+    from aiogram.types import InlineKeyboardButton
+    kb.inline_keyboard.append(
+        [InlineKeyboardButton(text="⬅️ В админку", callback_data="adm")]
+    )
+    await safe_edit(cb.message, text, kb)
     await answer_or_alert(cb)
 
 

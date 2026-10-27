@@ -36,6 +36,9 @@ async def cb_ads(cb: CallbackQuery):
     kb.inline_keyboard.insert(
         0, [InlineKeyboardButton(text="➕ Добавить кнопку",
                                  callback_data="adm:ads:add")])
+    kb.inline_keyboard.append(
+        [InlineKeyboardButton(text="⬅️ В админку", callback_data="adm")]
+    )
     text = ("🎯 <b>Рекламные кнопки</b>\n\n"
             + ("\n".join(lines) if lines else "Пока пусто.")
             + "\n\n<i>Показываются в меню и кабинете пользователей. "

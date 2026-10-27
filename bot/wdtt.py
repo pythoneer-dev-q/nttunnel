@@ -1,802 +1,787 @@
 # -*- coding: utf-8 -*-
-"""Асинхронный клиент WDTT Panel API."""
+"""Асинхронный клиент WDTT REST API v2 (Remnawave-style).
+
+Аутентификация:
+  - ``X-API-Key`` (рекомендуется);
+  - ``Authorization: Bearer <JWT>`` через ``POST /api/auth/token``.
+
+Все ответы панели обёрнуты в ``{"success": true, "data": ...}``. Клиент
+возвращает уже развёрнутый ``data``.
+"""
+from __future__ import annotations
 
 import asyncio
-import json
+import json as jsonlib
 import logging
-import re
 import ssl as ssl_mod
 import time
-from typing import Any, Optional
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Any
 
 import aiohttp
 
 log = logging.getLogger(__name__)
 
-_CSRF_HTML_RE = re.compile(
-    r'<input[^>]+(?:name=["\'][^"\']*csrf[^"\']*["\'][^>]*value=["\']([^"\']+)["\']'
-    r'|value=["\']([^"\']+)["\'][^>]*name=["\'][^"\']*csrf[^"\']*["\'])',
-    re.I,
+USER_CACHE_TTL = 5.0
+NODES_CACHE_TTL = 30.0
+
+_NODE_LIST_KEYS = (
+    "nodes", "connections", "node_links", "nodeLinks",
+    "configs", "configurations", "links",
 )
 
 
 class WdttError(Exception):
-    pass
+    """Ошибка клиента WDTT API."""
+
+    def __init__(self, message: str, code: int | None = None,
+                 status: int | None = None):
+        super().__init__(message)
+        self.code = code
+        self.status = status
 
 
-# Таймаут для «тяжёлых» запросов к панели (GET /panel/api/users).
-# Замерено: при 75 пользователях панель отдаёт список за 34–40 секунд
-# (и в keep-alive тоже — сервер считает ответ каждый раз), поэтому
-# дефолтный sock_read=20 сессии его всегда обрывал.
-SLOW_TIMEOUT = aiohttp.ClientTimeout(
-    total=90,
-    sock_connect=10,
-    sock_read=90,
-)
+# ------------------------------------------------------------------ helpers
+
+
+def human_bytes(value: Any) -> str:
+    """Байты в компактный человекочитаемый вид."""
+    try:
+        num = float(value or 0)
+    except (TypeError, ValueError):
+        num = 0.0
+
+    if num < 1024:
+        return f"{int(num)} Б"
+
+    for unit in ("КБ", "МБ", "ГБ", "ТБ"):
+        num /= 1024
+        if num < 1024 or unit == "ТБ":
+            return f"{num:.1f} {unit}"
+
+    return f"{num:.1f} ТБ"
+
+
+def traffic_bar(used_bytes: Any, total_gb: Any, width: int = 10) -> tuple[str, str, str, int]:
+    """Возвращает (полоса, использовано, всего, процент)."""
+    try:
+        total_b = float(total_gb or 0) * 1024 ** 3
+        used_b = float(used_bytes or 0)
+    except (TypeError, ValueError):
+        total_b, used_b = 0.0, 0.0
+
+    used_s = human_bytes(used_b)
+
+    if total_b <= 0:
+        return "∞", used_s, "∞", 0
+
+    pct = int(min(used_b / total_b * 100, 100))
+    if used_b > 0 and pct == 0:
+        pct = 1
+
+    filled = max(0, min(width, round(pct / 100 * width)))
+    if used_b > 0 and filled == 0:
+        filled = 1
+
+    bar = "█" * filled + "░" * (width - filled)
+    return bar, used_s, f"{float(total_gb):.0f} ГБ", pct
+
+
+def expires_text(expires_at: Any) -> str:
+    try:
+        ts = int(expires_at or 0)
+    except (TypeError, ValueError):
+        ts = 0
+
+    if ts <= 0:
+        return "бессрочно"
+
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%d.%m.%Y")
+    except (OSError, ValueError, OverflowError):
+        return "—"
+
+
+def user_status(user: dict) -> tuple[str, str]:
+    """(emoji + текст, ключ статуса)."""
+    status = str(user.get("status") or "").lower()
+
+    if status == "expired" or online_flag(user.get("is_expired")):
+        return "⌛ истёк", "expired"
+    if status == "exceeded" or online_flag(user.get("traffic_exceeded")):
+        return "📵 лимит исчерпан", "exceeded"
+    if (
+        status == "blocked"
+        or online_flag(user.get("is_deactivated"))
+        or ("active" in user and not online_flag(user.get("active")))
+    ):
+        return "🚫 заблокирован", "blocked"
+    if online_flag(user.get("online")):
+        return "🟢 онлайн", "active"
+    return "🟢 активен", "active"
+
+
+def _first(obj: dict, *keys: str) -> Any:
+    for key in keys:
+        value = obj.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _link_from(obj: Any) -> str:
+    """Достаёт ссылку подключения из вложенной структуры."""
+    if isinstance(obj, str):
+        s = obj.strip()
+        if s.startswith(("wdtt://", "qwdtt://", "http://", "https://")):
+            return s
+        return ""
+
+    if isinstance(obj, dict):
+        for key in ("link", "wdtt", "wdtt_link", "url", "value",
+                    "config", "connection", "subscription_url"):
+            found = _link_from(obj.get(key))
+            if found:
+                return found
+
+        for value in obj.values():
+            found = _link_from(value)
+            if found:
+                return found
+
+    if isinstance(obj, list):
+        for item in obj:
+            found = _link_from(item)
+            if found:
+                return found
+
+    return ""
+
+
+def _node_name(obj: dict, fallback: str = "") -> str:
+    node = obj.get("node") if isinstance(obj.get("node"), dict) else {}
+    return str(
+        _first(obj, "name", "node_name", "nodeName", "title", "host", "id")
+        or _first(node, "name", "host", "id")
+        or fallback
+        or "Нода"
+    )
+
+
+def extract_node_links(detail: dict, nodes: list | None = None) -> list[dict]:
+    """Возвращает список ``[{"name": ..., "link": ...}]`` для всех нод.
+
+    Панель может отдавать конфигурации в разных полях и форматах, поэтому
+    разбор намеренно гибкий. Дубликаты ссылок убираются.
+    """
+    detail = detail or {}
+    result: list[dict] = []
+    seen: set[str] = set()
+
+    def add(name: str, link: str) -> None:
+        link = (link or "").strip()
+        if not link or link in seen:
+            return
+        seen.add(link)
+        result.append({"name": (name or "Нода")[:40], "link": link})
+
+    # Список нод из /api/nodes — для имён по id/host.
+    nodes_by_id: dict[str, dict] = {}
+    nodes_by_host: dict[str, dict] = {}
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        for key in ("id", "name", "host"):
+            if node.get(key):
+                nodes_by_id[str(node[key])] = node
+        if node.get("host"):
+            nodes_by_host[str(node["host"])] = node
+
+    for key in _NODE_LIST_KEYS:
+        container = detail.get(key)
+        if not container:
+            continue
+
+        if isinstance(container, dict):
+            items = list(container.items())
+        elif isinstance(container, list):
+            items = list(enumerate(container))
+        else:
+            continue
+
+        for idx, item in items:
+            if isinstance(item, str):
+                name = str(idx)
+                node = nodes_by_id.get(name) or nodes_by_host.get(name)
+                if node:
+                    name = _node_name(node, name)
+                add(name, item)
+                continue
+
+            if not isinstance(item, dict):
+                continue
+
+            link = _link_from(item)
+            if not link:
+                continue
+
+            name = _node_name(item, str(idx) if isinstance(idx, int) else str(idx))
+            node = (
+                nodes_by_id.get(str(item.get("id") or ""))
+                or nodes_by_id.get(str(item.get("node_id") or ""))
+                or nodes_by_host.get(str(item.get("host") or ""))
+            )
+            if node:
+                name = _node_name(node, name)
+            add(name, link)
+
+    # Отдельная ссылка пользователя (мастер-нода).
+    master = _first(detail, "link", "wdtt_link", "url")
+    if master:
+        add("Основная нода", str(master))
+
+    # Если панель отдала список нод, но без ссылок — хотя бы подпишем их.
+    if not result and nodes:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            link = _link_from(node)
+            if link:
+                add(_node_name(node), link)
+
+    return result
+
+
+def subscription_url(user: dict) -> str:
+    return str(
+        _first(user, "subscription_url", "sub_url", "subscriptionUrl") or ""
+    )
+
+
+def online_flag(value: Any) -> bool:
+    """Приводит «строковые» булевы значения из панели к bool."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() not in (
+            "", "0", "false", "no", "off", "none", "null",
+            "inactive", "disabled", "stopped", "down", "offline",
+        )
+    if isinstance(value, dict):
+        for key in ("online", "active", "enabled", "running", "ok", "status"):
+            if key in value:
+                return online_flag(value[key])
+    return bool(value)
+
+
+def node_online(node: dict) -> bool:
+    if not isinstance(node, dict):
+        return False
+
+    for key in ("online", "is_online", "status"):
+        if key in node:
+            return online_flag(node[key])
+    return False
+
+
+def to_int(value: Any, default: int = 0) -> int:
+    """Аккуратно приводит число из панели к int."""
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return int(float(str(value).strip().replace(",", ".")))
+    except (TypeError, ValueError):
+        return default
+
+
+def _password(raw: dict) -> str:
+    """Панель маскирует ``password``, реальный ключ лежит в ``password_key``."""
+    masked = str(raw.get("password") or "")
+    key = str(raw.get("password_key") or "")
+
+    if key and ("*" in masked or not masked):
+        return key
+    return masked or key
+
+
+def normalize_user(raw: Any) -> dict:
+    """Приводит карточку пользователя панели к единому виду.
+
+    Панель отдаёт разные наборы полей: ``traffic_used`` вместо
+    ``traffic_used_bytes``, ``sub_url`` вместо ``subscription_url``,
+    идентификатор — ``sub_id``/``password_key``. Бот работает с
+    каноническими именами.
+    """
+    if not isinstance(raw, dict):
+        return {}
+
+    user = dict(raw)
+    nested = user.get("user")
+    if isinstance(nested, dict):
+        user = dict(nested)
+
+    used = user.get("traffic_used_bytes")
+    if used is None:
+        used = user.get("traffic_used")
+    if used is None:
+        used = user.get("total_bytes")
+    if used is None:
+        used = to_int(user.get("up_bytes")) + to_int(user.get("down_bytes"))
+
+    user["traffic_used_bytes"] = to_int(used)
+    user["total_gb"] = to_int(user.get("total_gb"))
+    user["expires_at"] = to_int(user.get("expires_at"))
+    user["max_devices"] = to_int(user.get("max_devices"))
+    user["devices_bound"] = to_int(user.get("devices_bound"))
+    user["online"] = online_flag(user.get("online"))
+    user["password"] = _password(user)
+    user["subscription_url"] = subscription_url(user)
+    user["sub_id"] = str(user.get("sub_id") or "")
+
+    if "active" not in user and "is_deactivated" in user:
+        user["active"] = not online_flag(user["is_deactivated"])
+    else:
+        user["active"] = online_flag(user.get("active", True))
+
+    user["id"] = str(
+        user.get("id")
+        or user.get("sub_id")
+        or user.get("password_key")
+        or user.get("name")
+        or ""
+    )
+
+    if not user.get("links") and isinstance(user.get("node_links"), list):
+        user["links"] = user["node_links"]
+
+    return user
+
+
+def normalize_node(raw: Any) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+
+    node = dict(raw)
+    node["online"] = node_online(node)
+    node["id"] = str(
+        node.get("id") or node.get("node_id") or node.get("name") or ""
+    )
+    return node
+
+
+def panel_tg_id(user: dict) -> int | None:
+    """Извлекает Telegram ID из name/comment пользователя панели."""
+    import re
+
+    for key in ("comment", "name", "description"):
+        raw = str(user.get(key) or "")
+        match = re.search(r"tg[_\s:-]*(-?\d{1,})", raw, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                pass
+    return None
 
 
 class WdttClient:
-    PREV_NAME_LIST = ("wdtt-csrf",)
+    """Клиент WDTT REST API v2."""
 
     def __init__(
         self,
         base_url: str,
-        username: str,
-        password: str,
+        api_key: str = "",
+        username: str = "",
+        password: str = "",
         ssl_insecure: bool = True,
+        timeout: int = 30,
     ):
-        self.base = base_url.rstrip("/")
-        self.username = username
-        self.password = password
+        self.base = (base_url or "").rstrip("/")
+        self.api_key = (api_key or "").strip()
+        self.username = username or ""
+        self.password = password or ""
         self.ssl_insecure = ssl_insecure
+        self.timeout = timeout
 
-        self._session: Optional[aiohttp.ClientSession] = None
-        self._logged_at = 0.0
+        self._session: aiohttp.ClientSession | None = None
+        self._token = ""
+        self._token_expires_at = 0.0
         self._lock = asyncio.Lock()
-        self._csrf = ""
 
-        # Кэш списка пользователей панели + O(1)-индексы для поиска.
-        # Панель не отдаёт пользователя по паролю, поэтому список
-        # запрашиваем не на каждый поиск: стартовый прогрев + фоновый
-        # sync раз в PANEL_SYNC_SEC; чтения идут из кэша/зеркала.
-        self._users_cache: Optional[dict] = None
-        self._users_cached_at = 0.0
-        self._users_index: dict[str, dict] = {}
-        self._users_comment_index: dict[str, dict] = {}
-        self._users_lock = asyncio.Lock()
+        self._user_cache: dict[str, tuple[float, dict]] = {}
+        self._nodes_cache: list | None = None
+        self._nodes_cached_at = 0.0
 
-        # Персистентное зеркало (Database). Подключается через attach_store.
-        self._store = None
-
-    def attach_store(self, store):
-        """Подключает персистентное зеркало пользователей панели."""
-        self._store = store
-
-    # ------------------------------------------------------------------ core
+    # ------------------------------------------------------------ session
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        session = self._session
-        if session is not None and not session.closed:
-            return session
+        if self._session is not None and not self._session.closed:
+            return self._session
 
-        connector = None
-
+        connector: aiohttp.TCPConnector
         if self.base.startswith("https"):
             ctx = ssl_mod.create_default_context()
-
             if self.ssl_insecure:
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl_mod.CERT_NONE
-
             connector = aiohttp.TCPConnector(
-                ssl=ctx,
-                limit=100,
-                limit_per_host=100,
-                ttl_dns_cache=300,
-                enable_cleanup_closed=True,
+                ssl=ctx, limit=50, limit_per_host=25,
+                ttl_dns_cache=300, enable_cleanup_closed=True,
             )
         else:
             connector = aiohttp.TCPConnector(
-                limit=100,
-                limit_per_host=100,
-                ttl_dns_cache=300,
-                enable_cleanup_closed=True,
+                limit=50, limit_per_host=25,
+                ttl_dns_cache=300, enable_cleanup_closed=True,
             )
 
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(
-                total=25,
-                connect=10,
-                sock_connect=10,
-                sock_read=20,
+                total=self.timeout,
+                connect=min(10, self.timeout),
+                sock_connect=min(10, self.timeout),
+                sock_read=self.timeout,
             ),
-            cookie_jar=aiohttp.CookieJar(unsafe=True),
             connector=connector,
         )
-
         return self._session
 
-    async def close(self):
-        session = self._session
-        self._session = None
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
 
-        if session is not None and not session.closed:
-            await session.close()
+    @asynccontextmanager
+    async def _session_ctx(self):
+        """Даёт общую сессию, не закрывая её после запроса."""
+        yield await self._get_session()
 
-    def _dump_cookies(self, s) -> str:
-        """Список имён и префиксов значений cookie для логирования."""
-        try:
-            cookies = s.cookie_jar.filter_cookies(self.base + "/")
-            return "; ".join(
-                f"{name}={cookie.value[:12]}..."
-                for name, cookie in cookies.items()
-            )
-        except Exception:  # noqa: BLE001
-            return "?"
+    # --------------------------------------------------------------- auth
 
-    async def _seed_csrf(self, s) -> str:
-        """Получает CSRF из cookie, при отсутствии один раз открывает /login."""
+    def _auth_headers(self) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+        elif self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        return headers
 
-        cookies = s.cookie_jar.filter_cookies(self.base + "/")
-
-        for name in self.PREV_NAME_LIST:
-            cookie = cookies.get(name)
-            if cookie is not None and cookie.value:
-                return cookie.value
-
-        try:
-            async with s.get(f"{self.base}/login") as r:
-                html = await r.text()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            log.debug("CSRF seed failed: %s", e)
-            return ""
-
-        for path in (f"{self.base}/login", self.base + "/"):
-            cookies = s.cookie_jar.filter_cookies(path)
-            for name in self.PREV_NAME_LIST:
-                cookie = cookies.get(name)
-                if cookie is not None and cookie.value:
-                    return cookie.value
-
-        match = _CSRF_HTML_RE.search(html)
-        if match:
-            return match.group(1) or match.group(2) or ""
-
-        return ""
-
-    async def _csrf_from_html(self, s) -> str:
-        """Fallback: извлекает CSRF из HTML /login."""
-        return await self._seed_csrf(s)
-
-    async def _refresh_csrf(self, s) -> str:
-        """Обновляет CSRF только при необходимости."""
-        token = await self._seed_csrf(s)
-        if token:
-            self._csrf = token
-        return self._csrf
-
-    async def _ensure_login(self):
-        """Авторизация с защитой от параллельных повторных логинов."""
-
-        if time.monotonic() - self._logged_at < 30 * 60:
+    async def _ensure_token(self, force: bool = False) -> None:
+        if self.api_key:
             return
 
+        now = time.time()
+        if not force and self._token and now < self._token_expires_at - 60:
+            return
+
+        await self._login()
+
+    async def _login(self) -> None:
         async with self._lock:
-            if time.monotonic() - self._logged_at < 30 * 60:
-                return
+            url = f"{self.base}/api/auth/token"
+            payload = {"username": self.username, "password": self.password}
 
-            s = await self._get_session()
+            async with self._session_ctx() as sess:
+                async with sess.post(url, json=payload) as resp:
+                    try:
+                        body = await resp.json(content_type=None)
+                    except Exception:
+                        body = {}
 
-            try:
-                await self._refresh_csrf(s)
-
-                data = {
-                    "username": self.username,
-                    "password": self.password,
-                }
-
-                headers = {"Referer": self.base + "/"}
-
-                if self._csrf:
-                    headers["X-CSRF-Token"] = self._csrf
-
-                async with s.post(
-                    f"{self.base}/login",
-                    json=data,
-                    headers=headers,
-                    allow_redirects=False,
-                ) as r:
-                    text = await r.text()
-
-                    rejected = (
-                        r.status not in (200, 201, 302, 303)
-                        or self._login_rejected(text)
-                    )
-
-                if rejected:
-                    await self._refresh_csrf(s)
-
-                    if self._csrf:
-                        headers["X-CSRF-Token"] = self._csrf
-                    else:
-                        headers.pop("X-CSRF-Token", None)
-
-                    async with s.post(
-                        f"{self.base}/login",
-                        data=data,
-                        headers=headers,
-                        allow_redirects=False,
-                    ) as r:
-                        text = await r.text()
-
-                        rejected = (
-                            r.status not in (200, 201, 302, 303)
-                            or self._login_rejected(text)
+                    if resp.status >= 400 or not body.get("success", False):
+                        raise WdttError(
+                            str(body.get("error") or f"auth failed ({resp.status})"),
+                            code=body.get("code"),
+                            status=resp.status,
                         )
 
-                if rejected:
-                    raise WdttError(f"login rejected: {text[:200]}")
+                    data = body.get("data") or {}
+                    self._token = str(data.get("token") or "")
+                    self._token_expires_at = float(
+                        data.get("expires_at") or (time.time() + 3600)
+                    )
 
-                await self._refresh_csrf(s)
-                self._logged_at = time.monotonic()
+                    if not self._token:
+                        raise WdttError("auth failed: empty token", status=resp.status)
 
-                log.debug("WDTT panel login OK: %s", self.base)
+                    log.info("WDTT: JWT token obtained")
 
-            except WdttError:
-                raise
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                raise WdttError(f"panel unreachable: {e}") from e
-
-    @staticmethod
-    def _login_rejected(text: str) -> bool:
-        """True, если сервер ответил {'success': false}."""
-
-        try:
-            data = json.loads(text)
-        except (json.JSONDecodeError, TypeError):
-            return False
-
-        return isinstance(data, dict) and data.get("success") is False
+    # ------------------------------------------------------------ request
 
     async def _request(
         self,
         method: str,
         path: str,
-        payload: Any = None,
-        retries: int = 2,
-        timeout: Optional[aiohttp.ClientTimeout] = None,
+        json: Any = None,
+        params: dict | None = None,
+        _retried: bool = False,
     ) -> Any:
-        s = await self._get_session()
-        url = f"{self.base}{path}"
-        last_err = "unknown error"
+        await self._ensure_token()
+        url = f"{self.base}/api{path}"
+        headers = self._auth_headers()
 
-        for attempt in range(retries + 1):
-            await self._ensure_login()
+        async with self._session_ctx() as sess:
+            async with sess.request(
+                method, url, json=json, params=params, headers=headers
+            ) as resp:
+                raw = await resp.read()
+                text = raw.decode("utf-8", "replace") if raw else ""
+                body: Any = {}
 
-            headers = {}
+                if text.strip():
+                    try:
+                        body = jsonlib.loads(text)
+                    except Exception:
+                        body = {}
 
-            if self._csrf:
-                headers["X-CSRF-Token"] = self._csrf
+                is_html = "<html" in text[:400].lower()
 
-            if isinstance(payload, dict):
-                body = payload.copy()
+                if resp.status == 401 and not self.api_key and not _retried:
+                    await self._ensure_token(force=True)
+                    return await self._request(
+                        method, path, json=json, params=params, _retried=True
+                    )
 
-                # Первый запрос идёт сразу с наиболее вероятным вариантом.
-                if self._csrf:
-                    body["_csrf"] = self._csrf
-            else:
-                body = payload
+                if resp.status >= 400:
+                    error = body.get("error") if isinstance(body, dict) else None
 
-            try:
-                async with s.request(
-                    method,
-                    url,
-                    json=body if body is not None else {},
-                    headers=headers,
-                    timeout=timeout,  # None → таймаут сессии
-                ) as r:
-                    text = await r.text()
+                    if not error and is_html:
+                        error = (
+                            f"панель вернула HTML вместо JSON (HTTP {resp.status}); "
+                            "проверь WAF/прокси перед панелью"
+                        )
 
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                last_err = f"{method} {path}: {e}"
+                    raise WdttError(
+                        str(error or f"HTTP {resp.status}"),
+                        code=body.get("code") if isinstance(body, dict) else None,
+                        status=resp.status,
+                    )
 
-                if attempt < retries:
-                    continue
+                if not body and is_html:
+                    raise WdttError(
+                        "панель вернула HTML вместо JSON — проверь WAF/прокси",
+                        status=resp.status,
+                    )
 
-                raise WdttError(last_err) from e
+                if isinstance(body, dict):
+                    if body.get("success") is False:
+                        raise WdttError(
+                            str(body.get("error") or "unknown panel error"),
+                            code=body.get("code"),
+                            status=resp.status,
+                        )
+                    if "data" in body:
+                        return body["data"]
+                    if isinstance(body.get("user"), dict):
+                        return body["user"]
+                    return body
 
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError as e:
-                raise WdttError(
-                    f"{method} {path}: bad json ({text[:200]!r})"
-                ) from e
+                return body
 
-            if not isinstance(data, dict) or data.get("success") is not False:
-                return data.get("obj") if isinstance(data, dict) else data
+    # --------------------------------------------------------------- users
 
-            last_err = str(data.get("msg", "unknown error"))
-            low = last_err.lower()
-
-            if "csrf" not in low and "unauthorized" not in low:
-                raise WdttError(last_err)
-
-            # Сессия или CSRF протухли. Следующая итерация перелогинится.
-            self._logged_at = 0.0
-            self._csrf = ""
-
-            if attempt < retries:
-                continue
-
-        raise WdttError(f"{method} {path}: {last_err}")
-
-    # ------------------------------------------------------------ endpoints
-
-    async def status(self) -> dict:
-        return await self._request("GET", "/panel/api/status")
-
-    async def get_inbound(self) -> dict:
-        return await self._request("GET", "/panel/api/inbound")
-
-    async def save_inbound(self, payload: dict) -> dict:
-        return await self._request(
-            "POST",
-            "/panel/api/inbound/save",
-            payload,
-        )
-
-    async def get_users(self, force: bool = False) -> dict:
-        """{'main_password': ..., 'users': [...], 'inbound': {...}}.
-
-        ``force=False`` → кэш (без сетевых запросов, cold start — один).
-        ``force=True`` → реальный запрос к панели (мутации/фоновый sync).
-        """
-        return await self._load_users(force=force)
-
-    # ------------------------------------------------------- users cache/index
-
-    @staticmethod
-    def _index_users(data: dict) -> tuple[dict, dict]:
-        """Строит индексы O(1): по паролю и по комментарию."""
-        by_password: dict[str, dict] = {}
-        by_comment: dict[str, dict] = {}
-
-        for u in (data.get("users") or []):
-            if not isinstance(u, dict):
-                continue
-
-            for key in (u.get("password_key"), u.get("password")):
-                if key:
-                    by_password[str(key)] = u
-
-            comment = u.get("comment")
-            if comment:
-                by_comment.setdefault(str(comment), u)
-
-        return by_password, by_comment
-
-    def invalidate_users(self):
-        """Сбрасывает кэш списка пользователей (страховка/админские операции)."""
-        self._users_cache = None
-        self._users_cached_at = 0.0
-        self._users_index = {}
-        self._users_comment_index = {}
-
-    @property
-    def cache_ready(self) -> bool:
-        """True, если список панели хоть раз загружался в память."""
-        return self._users_cache is not None
-
-    # ------------------------------------------- точечные операции с кэшем
-    # Вместо инвалидации ВСЕГО кэша (после чего пришлось бы заново
-    # парсить 35-40-секундный список) — правим одну запись напрямую.
-
-    def _cached_users(self) -> list:
-        if self._users_cache is None:
-            self._users_cache = {"users": []}
-        return self._users_cache.setdefault("users", [])
-
-    @staticmethod
-    def _find_cached_index(users: list, key: str, comment: str | None = None):
-        for i, u in enumerate(users):
-            u_key = str(u.get("password_key") or u.get("password") or "")
-            if key and u_key == key:
-                return i
-            if comment and u.get("comment") == comment:
-                return i
-        return None
-
-    async def _upsert_cached(self, user: dict):
-        """Точечно вставляет/обновляет запись в кэше и зеркале."""
-        key = str(user.get("password_key") or user.get("password") or "")
-        comment = user.get("comment") or ""
-        users = self._cached_users()
-
-        idx = self._find_cached_index(users, key, comment)
-
-        if idx is None:
-            merged = dict(user)
-            users.append(merged)
-        else:
-            merged = {**users[idx], **user}
-            users[idx] = merged
-
-        for k in (merged.get("password_key"), merged.get("password")):
-            if k:
-                self._users_index[str(k)] = merged
-        if merged.get("comment"):
-            self._users_comment_index[str(merged["comment"])] = merged
-
-        if self._store is not None:
-            try:
-                await self._store.upsert_panel_user(merged)
-            except Exception as e:  # noqa: BLE001 — зеркало не должно ломать flow
-                log.warning("panel mirror upsert failed: %s", e)
-
-    async def _patch_cached(self, key: str, patch: dict):
-        """Применяет поля к существующей записи в кэше/зеркале."""
-        users = self._cached_users()
-        idx = self._find_cached_index(users, key, key)
-        if idx is None:
-            return  # записи нет — её донесёт часовой sync
-        await self._upsert_cached({**users[idx], **patch})
-
-    async def _drop_cached(self, key: str):
-        """Удаляет запись из кэша и зеркала по паролю/комментарию."""
-        if not key:
-            return
-        users = self._cached_users()
-        idx = self._find_cached_index(users, key, key)
-        if idx is not None:
-            users.pop(idx)
-        self._users_index.pop(key, None)
-        self._users_comment_index.pop(key, None)
-
-        if self._store is not None:
-            try:
-                await self._store.drop_panel_user(key)
-            except Exception as e:  # noqa: BLE001
-                log.warning("panel mirror drop failed: %s", e)
-
-    async def note_user_created(
+    async def list_users(
         self,
-        password: str,
-        comment: str = "",
-        total_gb: int = 0,
-        max_devices: int = 1,
+        q: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> dict:
-        """Вставляет только что созданного пользователя в кэш/зеркало
-        НАПРЯМУЮ — без парсинга всего списка панели (~35–40 секунд).
-
-        Порты берутся из inbound последнего снапшота; sub_id/sub_url/link
-        панель сгенерирует при ближайшем фоновом sync (раз в час).
-        """
-        ib: dict = {}
-
-        if self._users_cache and isinstance(
-            self._users_cache.get("inbound"), dict
-        ):
-            ib = self._users_cache["inbound"]
-        elif self._store is not None:
-            try:
-                ib = await self._store.get_panel_inbound() or {}
-            except Exception:  # noqa: BLE001
-                ib = {}
-
-        user = {
-            "password": password,
-            "password_key": password,
-            "comment": comment,
-            "total_gb": total_gb,
-            "max_devices": max_devices,
-            "active": True,
-            "online": False,
-            "expires": "бессрочно",
-            "expires_at": 0,
-            "traffic_used": 0,
-            "traffic_used_fmt": "0.0 KB",
-            "down": "0.0 KB",
-            "up": "0.0 KB",
-            "down_bytes": 0,
-            "up_bytes": 0,
-            "total_bytes": 0,
-            "traffic_exceeded": False,
-            "devices_bound": 0,
-            "device_ids": [],
-            "vk_hash": "",
-            "is_main": False,
-            "dtls_port": ib.get("dtls_port") or 0,
-            "wg_port": ib.get("wg_port") or 0,
-            "client_port": ib.get("client_port") or 0,
+        params: dict[str, Any] = {
+            "limit": max(1, min(int(limit), 200)),
+            "offset": max(0, int(offset)),
         }
+        if q:
+            params["q"] = q
+        if status and status != "all":
+            params["status"] = status
 
-        await self._upsert_cached(user)
+        data = await self._request("GET", "/users", params=params)
+
+        if isinstance(data, list):
+            users = [normalize_user(u) for u in data if isinstance(u, dict)]
+            return {"total": len(users), "users": users}
+
+        if not isinstance(data, dict):
+            return {"total": 0, "users": []}
+
+        users = data.get("users") or data.get("items") or []
+        if not isinstance(users, list):
+            users = []
+
+        users = [normalize_user(u) for u in users if isinstance(u, dict)]
+
+        try:
+            total = int(data.get("total") or data.get("count") or len(users))
+        except (TypeError, ValueError):
+            total = len(users)
+
+        return {"total": total, "users": users}
+
+    async def get_user(self, user_id: str, force: bool = False) -> dict:
+        user_id = str(user_id or "").strip()
+        if not user_id:
+            raise WdttError("user id is empty")
+
+        now = time.time()
+        if not force:
+            cached = self._user_cache.get(user_id)
+            if cached and now - cached[0] < USER_CACHE_TTL:
+                return cached[1]
+
+        data = await self._request("GET", f"/users/{user_id}")
+        user = normalize_user(data)
+        self._user_cache[user_id] = (now, user)
         return user
 
-    async def _load_users(self, force: bool = False) -> dict:
-        """Отдаёт список пользователей из кэша; панель — только по force.
+    def invalidate_user(self, user_id: str) -> None:
+        self._user_cache.pop(str(user_id or ""), None)
 
-        Философия: панель парсим редко (стартовый прогрев + фоновый sync
-        раз в ``PANEL_SYNC_SEC``), а на чтения НИКОГДА не ходим в сеть.
-
-        - ``force=False`` → кэш как есть (пусть устаревший); исключение —
-          cold start (кэш ещё ни разу не грузился), тогда один запрос;
-        - ``force=True`` → реальный запрос к панели (мутации/фоновый sync),
-          с барьером <2с от частых повторов.
-
-        Single-flight: параллельные вызовы не плодят запросы к панели.
-        """
-        if not force and self._users_cache is not None:
-            return self._users_cache
-
-        async with self._users_lock:
-            if not force and self._users_cache is not None:
-                return self._users_cache
-            if force and time.monotonic() - self._users_cached_at < 2.0:
-                return self._users_cache or {}
-
-            t0 = time.monotonic()
-            data = await self._request(
-                "GET", "/panel/api/users",
-                retries=0, timeout=SLOW_TIMEOUT,
-            )
-            elapsed = time.monotonic() - t0
-
-            if elapsed > 10.0:
-                log.info(
-                    "panel users list slow: %.1fs (%d users)",
-                    elapsed,
-                    len((data or {}).get("users") or []),
-                )
-
-            if not isinstance(data, dict):
-                data = {}
-
-            self._users_cache = data
-            self._users_cached_at = time.monotonic()
-            (
-                self._users_index,
-                self._users_comment_index,
-            ) = self._index_users(data)
-
-            await self._persist(data)
-
-            return data
-
-    async def _persist(self, data: dict):
-        """Сохраняет снапшот пользователей в персистентное зеркало."""
-        if self._store is None or not data:
-            return
-        try:
-            await self._store.sync_panel_users(
-                data.get("users") or [],
-                inbound=data.get("inbound"),
-                main_password=data.get("main_password"),
-            )
-        except Exception as e:  # noqa: BLE001 — зеркало не должно ломать flow
-            log.warning("panel mirror sync failed: %s", e)
-
-    async def add_user(
+    async def create_user(
         self,
+        name: str,
         comment: str = "",
         total_gb: int = 0,
-        max_devices: int = 1,
         expires_at: int = 0,
+        max_devices: int = 1,
+        max_down_mbps: int = 0,
+        max_up_mbps: int = 0,
         active: bool = True,
-    ) -> str:
-        """Создаёт пользователя, возвращает его пароль."""
-
-        payload = {
-            "comment": comment,
-            "expires_at": expires_at,
-            "total_gb": total_gb,
-            "max_down_mbps": 0,
-            "max_up_mbps": 0,
-            "max_devices": max_devices,
-            "active": active,
-            "count": 1,
+        password: str = "",
+    ) -> dict:
+        payload: dict[str, Any] = {
+            "name": name,
+            "total_gb": max(0, int(total_gb or 0)),
+            "expires_at": max(0, int(expires_at or 0)),
+            "max_devices": max(1, int(max_devices or 1)),
+            "max_down_mbps": max(0, int(max_down_mbps or 0)),
+            "max_up_mbps": max(0, int(max_up_mbps or 0)),
+            "active": bool(active),
         }
+        if comment:
+            payload["comment"] = comment
+        if password:
+            payload["password"] = password
 
-        obj = await self._request(
-            "POST",
-            "/panel/api/users/add",
-            payload,
-        )
+        data = await self._request("POST", "/users", json=payload)
+        result = normalize_user(data)
+        user_id = str(result.get("id") or name)
+        result["id"] = user_id
+        self._user_cache[user_id] = (time.time(), result)
+        return result
 
-        # Кэш НЕ инвалидируем: запись нового пользователя добавляется
-        # точечно через note_user_created (без парсинга всего списка).
+    async def update_user(self, user_id: str, **fields: Any) -> dict:
+        allowed = {
+            "name", "comment", "total_gb", "expires_at", "max_devices",
+            "max_down_mbps", "max_up_mbps", "active", "password",
+        }
+        payload = {
+            key: value for key, value in fields.items()
+            if key in allowed and value is not None
+        }
+        data = await self._request("PUT", f"/users/{user_id}", json=payload)
+        self.invalidate_user(user_id)
+        return data if isinstance(data, dict) else {}
 
-        if isinstance(obj, dict):
-            passwords = obj.get("passwords")
+    async def activate_user(self, user_id: str) -> dict:
+        data = await self._request("POST", f"/users/{user_id}/activate")
+        self.invalidate_user(user_id)
+        return data if isinstance(data, dict) else {}
 
-            if passwords:
-                return passwords[0]
+    async def block_user(self, user_id: str) -> dict:
+        data = await self._request("POST", f"/users/{user_id}/block")
+        self.invalidate_user(user_id)
+        return data if isinstance(data, dict) else {}
 
-            password = obj.get("password")
+    async def reset_traffic(self, user_id: str) -> dict:
+        data = await self._request("POST", f"/users/{user_id}/reset-traffic")
+        self.invalidate_user(user_id)
+        return data if isinstance(data, dict) else {}
 
-            if password:
-                return password
+    async def delete_user(self, user_id: str) -> dict:
+        data = await self._request("DELETE", f"/users/{user_id}")
+        self.invalidate_user(user_id)
+        return data if isinstance(data, dict) else {}
 
-        if isinstance(obj, str):
-            return obj
+    async def find_user(self, query: str) -> dict | None:
+        """Поиск по name/comment/password. Возвращает первую запись."""
+        query = (query or "").strip()
+        if not query:
+            return None
 
-        raise WdttError(f"unexpected add_user response: {obj!r}")
+        data = await self.list_users(q=query, limit=50)
+        users = data.get("users") or []
+        low = query.lower()
 
-    async def update_user(self, password: str, **fields) -> dict:
-        """Обновить пользователя."""
+        for user in users:
+            if not isinstance(user, dict):
+                continue
+            values = [
+                str(user.get("id") or ""),
+                str(user.get("name") or ""),
+                str(user.get("comment") or ""),
+                str(user.get("password") or ""),
+            ]
+            if any(value.lower() == low for value in values):
+                return user
 
-        payload = {"old_password": password}
-        payload.update(fields)
+        return users[0] if users and isinstance(users[0], dict) else None
 
-        result = await self._request(
-            "POST",
-            "/panel/api/users/update",
-            payload,
-        )
+    # --------------------------------------------------------------- nodes
 
-        # Точечное обновление одной записи — кэш не сносим целиком.
-        if fields.get("password") and str(fields["password"]) != str(password):
-            # Пароль сменился: старую запись убираем, свежую даст sync.
-            await self._drop_cached(password)
+    async def list_nodes(self, force: bool = False) -> list:
+        now = time.time()
+        if (
+            not force
+            and self._nodes_cache is not None
+            and now - self._nodes_cached_at < NODES_CACHE_TTL
+        ):
+            return list(self._nodes_cache)
+
+        data = await self._request("GET", "/nodes")
+        if isinstance(data, dict):
+            nodes = data.get("nodes") or data.get("items") or []
+        elif isinstance(data, list):
+            nodes = data
         else:
-            patch = {k: v for k, v in fields.items() if k != "password"}
-            if patch:
-                await self._patch_cached(password, patch)
+            nodes = []
 
-        return result
+        nodes = [normalize_node(n) for n in nodes if isinstance(n, dict)]
 
-    async def delete_user(self, password: str) -> dict:
-        result = await self._request(
-            "POST",
-            "/panel/api/users/delete",
-            {"password": password},
-        )
+        self._nodes_cache = list(nodes)
+        self._nodes_cached_at = now
+        return list(nodes)
 
-        # Точечно убираем одну запись из кэша и зеркала.
-        await self._drop_cached(password)
+    async def add_node(self, payload: dict) -> dict:
+        data = await self._request("POST", "/nodes", json=payload)
+        self._nodes_cache = None
+        return normalize_node(data)
 
-        return result
+    async def delete_node(self, node_id: str) -> dict:
+        data = await self._request("DELETE", f"/nodes/{node_id}")
+        self._nodes_cache = None
+        return data if isinstance(data, dict) else {}
 
-    async def reset_traffic(self, password: str) -> dict:
-        result = await self._request(
-            "POST",
-            "/panel/api/users/reset-traffic",
-            {"password": password},
-        )
+    async def ping_node(self, node_id: str) -> dict:
+        data = await self._request("POST", f"/nodes/{node_id}/ping")
+        return data if isinstance(data, dict) else {}
 
-        # Обнуляем счётчики в кэше/зеркале точечно.
-        await self._patch_cached(password, {
-            "traffic_used": 0,
-            "traffic_used_fmt": "0.0 KB",
-            "down": "0.0 KB",
-            "up": "0.0 KB",
-            "down_bytes": 0,
-            "up_bytes": 0,
-            "total_bytes": 0,
-            "traffic_exceeded": False,
-        })
+    # -------------------------------------------------------------- system
 
-        return result
+    async def status(self) -> dict:
+        data = await self._request("GET", "/status")
+        return data if isinstance(data, dict) else {}
 
-    async def restart_wdtt(self) -> Any:
-        return await self._request(
-            "POST",
-            "/panel/api/server/restartWdttService",
-            {},
-        )
+    async def restart(self) -> dict:
+        data = await self._request("POST", "/system/restart")
+        return data if isinstance(data, dict) else {}
 
-    async def restart_xray(self) -> Any:
-        return await self._request(
-            "POST",
-            "/panel/api/server/restartXrayService",
-            {},
-        )
+    # Backward-compatible aliases
+    async def restart_wdtt(self) -> dict:
+        return await self.restart()
 
-    # ------------------------------------------------------------- helpers
-
-    def _indexed_user(self, key: str) -> Optional[dict]:
-        """Ищет в прогретом in-memory индексе (обновляется фоновым sync)."""
-        if self._users_cache is None:
-            return None
-        return self._users_index.get(key) or self._users_comment_index.get(key)
-
-    async def _store_user(self, key: str) -> Optional[dict]:
-        """Ищет в персистентном зеркале (если подключено)."""
-        if self._store is None:
-            return None
-        try:
-            return await self._store.get_panel_user(key)
-        except Exception as e:  # noqa: BLE001
-            log.warning("panel mirror read failed: %s", e)
-            return None
-
-    async def find_user(
-        self,
-        comment_or_password: str,
-        force: bool = False,
-        strict: bool = False,
-    ) -> Optional[dict]:
-        """Находит пользователя по паролю/комментарию.
-
-        Порядок чтения (без перебора всех пользователей):
-          1) прогретый in-memory индекс;
-          2) персистентное зеркало в MongoDB;
-          3) панель — только при ``force=True`` или холодном старте.
-
-        ``strict=True`` — если панель недоступна, бросает ``WdttError``
-        вместо отдачи устаревшего кэша. Нужно, чтобы отличить «панель
-        лежит» от «пользователя реально нет».
-        """
-        if not comment_or_password:
-            return None
-
-        key = str(comment_or_password)
-
-        if not force:
-            user = self._indexed_user(key)
-
-            if user is not None:
-                return user
-
-            user = await self._store_user(key)
-
-            if user is not None:
-                return user
-
-        try:
-            await self._load_users(force=force)
-        except WdttError:
-            if strict:
-                raise
-
-            # Панель недоступна — отдаём устаревшее зеркало/кэш, если есть.
-            user = self._indexed_user(key)
-
-            if user is None:
-                user = await self._store_user(key)
-
-            return user
-
-        return self._indexed_user(key)
-
-    @staticmethod
-    def build_link(
-        inbound: dict,
-        password: str,
-        ps: str = "",
-        vk_hashes: list | None = None,
-        app: str = "wdtt",
-    ) -> str:
-        """Генерирует WDTT-ссылку напрямую из данных inbound."""
-        host = (
-            inbound.get("server_host")
-            or inbound.get("server_ip")
-            or inbound.get("listen_host")
-            or ""
-        )
-
-        host = str(host).strip()
-
-        if not host or host == "0.0.0.0":
-            raise WdttError("server host/ip is missing")
-
-        dtls = inbound.get("dtls_port")
-        wg = inbound.get("wg_port")
-        client = inbound.get("client_port")
-
-        if not dtls or not wg:
-            raise WdttError(
-                f"incomplete inbound data: dtls_port={dtls}, wg_port={wg}"
-            )
-
-        hashes = ",".join(
-            h for h in (vk_hashes or [])
-            if h
-        )
-
-        core = f"{host}:{dtls}:{wg}:{client or 0}:{password}"
-
-        if hashes:
-            core += f":{hashes}"
-
-        return f"wdtt://{core}"
+    async def restart_xray(self) -> dict:
+        return await self.restart()

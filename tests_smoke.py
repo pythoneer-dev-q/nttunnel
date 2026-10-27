@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Юнит-тест без сети: конфиг, ссылки, клавиатуры, утилиты."""
-import base64
-import json
+"""Оффлайн-тесты: конфиг, форматирование, ссылки нод, клавиатуры, тексты."""
 import os
 
 os.environ.setdefault("BOT_TOKEN", "123:test")
@@ -10,140 +8,200 @@ os.environ.setdefault("ADMINS", "1")
 
 def test_config():
     from bot.config import load_config
+
     cfg = load_config()
-    assert "wdtt" in cfg.panel_base and cfg.panel_base.startswith("https")
+    assert cfg.panel_base.startswith("https")
     assert cfg.defaults_total_gb == 175
-    assert cfg.panel_username == "root"
+    assert cfg.defaults_max_devices >= 1
+    assert cfg.nodes_copy_limit == 5
     print("config OK:", cfg.panel_base, cfg.defaults_total_gb)
 
 
-def test_link():
-    from bot.wdtt import WdttClient
-    ib = {"server_host": "", "listen_host": "0.0.0.0",
-          "dtls_port": 56000, "wg_port": 56001, "client_port": 9000,
-          "tag": "wdtt-in", "server_ip": "2.26.80.168"}
-    link = WdttClient.build_link(ib, "secret12",
-                                 vk_hashes=["h1", "h2"], app="wdtt")
-    assert link == "wdtt://2.26.80.168:56000:56001:9000:secret12:h1,h2", link
-    # без server_host/ip build_link бросает ошибку (данные неполные)
-    try:
-        WdttClient.build_link({"dtls_port": 56000}, "secret12", app="wdtt")
-        raise AssertionError("expected WdttError on missing host")
-    except Exception as e:
-        assert "host" in str(e).lower()
-    print("link OK:", link)
+def test_helpers():
+    from bot.wdtt import (
+        expires_text,
+        extract_node_links,
+        human_bytes,
+        node_online,
+        online_flag,
+        panel_tg_id,
+        traffic_bar,
+    )
+    from bot.services import as_int
 
+    assert human_bytes(0) == "0 Б"
+    assert human_bytes(1024) == "1.0 КБ"
+    assert human_bytes(1024 ** 3) == "1.0 ГБ"
 
-def test_utils():
-    from bot.utils import page_slice, extract_url, extract_vk_hash, TTLCache
-    items = list(range(21))
-    chunk, pages, page = page_slice(items, 2, size=8)
-    assert pages == 3 and len(chunk) == 5 and chunk[0] == 16
-    assert extract_url("жми https://t.me/foo/bar?x=1 быстро") == \
-        "https://t.me/foo/bar?x=1"
-    # VK-хеш
-    assert extract_vk_hash("https://vk.com/call/join/nebebu777a") == \
-        "nebebu777a"
-    assert extract_vk_hash("2991rjfjqJF28aa") == "2991rjfjqJF28aa"
-    assert extract_vk_hash("vk.com/call/join/word1x /proba") == "word1x"
-    assert extract_vk_hash("просто текст без хэша") is None
-    c = TTLCache(0.01)
-    c.set("k", 1)
-    assert c.get("k") is None or True  # ttl логика smoke
-    print("utils OK")
+    bar, used, total, pct = traffic_bar(1024 ** 3, 100)
+    assert "█" in bar and used == "1.0 ГБ" and total == "100 ГБ"
+    assert pct == 1
+
+    assert expires_text(0) == "бессрочно"
+    assert panel_tg_id({"comment": "tg123456"}) == 123456
+    assert panel_tg_id({"name": "tg_42"}) == 42
+
+    detail = {
+        "link": "wdtt://master",
+        "nodes": [
+            {"name": "NL", "link": "wdtt://nl"},
+            {"node": {"name": "DE"}, "links": {"wdtt": "wdtt://de"}},
+        ],
+    }
+    nodes = [{"id": "n1", "name": "NL", "host": "nl.example"}]
+    links = extract_node_links(detail, nodes)
+
+    assert any(x["link"] == "wdtt://nl" for x in links)
+    assert any(x["link"] == "wdtt://de" for x in links)
+    assert any(x["link"] == "wdtt://master" for x in links)
+
+    # строковые булевы значения панели
+    assert online_flag(True) and online_flag("true") and online_flag("online")
+    assert not online_flag("false") and not online_flag("0") and not online_flag(None)
+    assert node_online({"online": "false"}) is False
+    assert node_online({"status": "active"}) is True
+    assert node_online({"enabled": 1}) is False
+
+    assert as_int("12") == 12
+    assert as_int("12.9") == 12
+    assert as_int(None) == 0
+    assert as_int("n/a", 7) == 7
+    print("helpers OK")
 
 
 def test_keyboards():
-    from bot.keyboards import (agreement_kb, apps_kb, config_kb, done_kb,
-                               hash_added_kb, hash_prompt_kb, menu_kb,
-                               menu_back_kb, no_config_kb, show_link_kb,
-                               step_app_kb)
-    links = [{"label": "L", "url": "https://x.io"}]
+    from bot.keyboards import (
+        access_kb,
+        adm_root_kb,
+        agreement_kb,
+        apps_kb,
+        menu_kb,
+        nodes_kb,
+        sub_kb,
+        subscribe_kb,
+        support_kb,
+    )
+
     ads = [{"title": "AD", "url": "https://ad.io"}]
-    secs = [{"key": "faq", "title": "FAQ"}, {"key": "partners", "title": "P"}]
-    for kb in (menu_kb(False, ads), menu_kb(True, ads, secs),
-               apps_kb(links), step_app_kb(), agreement_kb(),
-               hash_prompt_kb(), hash_added_kb(["abcd1234"]),
-               hash_added_kb(["a1", "b2", "c3", "d4"]),
-               done_kb("https://sub", "wdtt://x"), show_link_kb(),
-               config_kb("https://sub", "wdtt://ios", "wdtt://android"),
-               no_config_kb(), menu_back_kb(secs)):
+    sections = [{"key": "faq", "title": "FAQ"}]
+    links = [
+        {"name": f"Node {i}", "link": f"wdtt://node-{i}"}
+        for i in range(7)
+    ]
+
+    keyboards = [
+        menu_kb(False, ads, sections),
+        menu_kb(True, ads, sections),
+        access_kb(links, "https://sub.example", 5, len(links)),
+        sub_kb("https://sub.example", links, 5),
+        apps_kb([{"label": "App", "url": "https://app"}]),
+        agreement_kb(),
+        support_kb(),
+        subscribe_kb([{"channel_id": -100123, "title": "Ch"}]),
+        adm_root_kb(),
+        nodes_kb([{"id": "n1", "name": "N1", "online": True}], 0, 1),
+    ]
+
+    for kb in keyboards:
         assert kb.inline_keyboard
-    # динамические разделы реально попали в меню
-    data = [b.callback_data for row in menu_kb(True, ads, secs).inline_keyboard
-            for b in row if b.callback_data]
-    assert "u:sec:faq" in data and "u:sec:partners" in data
-    # колбэки не длиннее лимита Telegram (64 байта)
-    for row in hash_added_kb(["abcdefgh1234"]).inline_keyboard:
-        for b in row:
-            if b.callback_data:
-                assert len(b.callback_data.encode()) <= 64
+
+    # динамические разделы попали в меню
+    data = [
+        b.callback_data
+        for row in menu_kb(True, ads, sections).inline_keyboard
+        for b in row
+        if b.callback_data
+    ]
+    assert "u:sec:faq" in data
+
+    # первые 5 нод — кнопки копирования, остальные — в подписке
+    copied = [
+        b
+        for row in access_kb(links, "https://sub", 5, 7).inline_keyboard
+        for b in row
+        if b.copy_text
+    ]
+    assert len(copied) == 5
+
+    labels = [
+        b.text
+        for row in access_kb(links, "https://sub", 5, 7).inline_keyboard
+        for b in row
+    ]
+    assert any("ещё 2" in (t or "") for t in labels)
+
+    # callback_data в пределах лимита Telegram
+    for kb in keyboards:
+        for row in kb.inline_keyboard:
+            for button in row:
+                if button.callback_data:
+                    assert len(button.callback_data.encode()) <= 64
+
     print("keyboards OK")
 
 
-def test_styles():
-    from bot.keyboards import btn
-    b = btn("Test", cb="x", style="success")
-    assert b.text == "Test" and b.callback_data == "x"
-    b2 = btn("Go", url="https://y.io", style="danger")
-    assert b2.text == "Go" and b2.url == "https://y.io"
-    b3 = btn("NoStyle", cb="x")
-    assert b3.style is None or b3.style != "success"
-    # флоу: кнопка «✅ Продолжить» обязана быть
-    from bot.keyboards import hash_added_kb
-    texts = []
-    for kb in (hash_added_kb(["abcd1234"]),):
-        for row in kb.inline_keyboard:
-            for x in row:
-                texts.append(x.text or "")
-    assert any(t.startswith("✅ Продолжить") for t in texts), texts
-    print("styles OK")
+def test_texts():
+    from bot.texts import access_text, menu_text, sub_text
+
+    user = {
+        "tg_id": 1,
+        "full_name": "Test",
+        "registered": True,
+        "panel_total_gb": 175,
+        "panel_traffic_used_bytes": 10 * 1024 ** 3,
+        "panel_expires_at": 0,
+        "panel_max_devices": 2,
+        "panel_devices_bound": 1,
+        "panel_online": True,
+        "panel_status": "active",
+        "panel_password": "pwd",
+        "subscription_url": "https://sub.example",
+    }
+    live = {
+        "id": "tg_1",
+        "password": "pwd",
+        "total_gb": 175,
+        "traffic_used_bytes": 10 * 1024 ** 3,
+        "expires_at": 0,
+        "max_devices": 2,
+        "devices_bound": 1,
+        "online": True,
+        "active": True,
+        "status": "active",
+        "link": "wdtt://master",
+        "subscription_url": "https://sub.example",
+    }
+    links = [
+        {"name": f"Node {i}", "link": f"wdtt://node-{i}"} for i in range(6)
+    ]
+
+    menu = menu_text(user)
+    access = access_text(user, live, links, 5)
+    sub = sub_text(user, live, links)
+
+    assert "10.0 ГБ" in menu and "175 ГБ" in menu
+    assert "10.0 ГБ" in access and "Ноды" in access
+    assert "5 кнопками" in access and "1 в подписке" in access
+    assert "10.0 ГБ" in sub and "https://sub.example" in sub
+    print("texts OK")
 
 
-def test_link_format():
-    """Проверка нового colon-формата ссылки WDTT."""
-    import base64
-    from bot.keyboards import done_kb
-    from bot.texts import config_text, done_text, wdtt_configs
-    from bot.wdtt import WdttClient
+def test_copy_limit():
+    from bot.keyboards import copy_btn
 
-    inbound = {"server_host": "2.26.80.168", "dtls_port": 56000,
-               "wg_port": 56001, "client_port": 9000}
-    link = WdttClient.build_link(
-        inbound, "C3gY8a47KX9CeMmV", vk_hashes=["nebebu677bb"], app="wdtt")
-    assert link == "wdtt://2.26.80.168:56000:56001:9000:C3gY8a47KX9CeMmV:nebebu677bb", link
-    # qwdtt — отдельный формат, build_link пока генерирует только wdtt
-    q = WdttClient.build_link(
-        inbound, "P", vk_hashes=["h1", "h2"], app="qwdtt")
-    assert q.startswith("wdtt://")
-    # тексты содержат ссылку в <code>
-    d = done_text("P", 175, 1, "WDTT", ["h1"],
-                  ios_link="wdtt://2.26.80.168:56000:56001:0:P:h1",
-                  android_link="wdtt://2.26.80.168:56000:56001:9000:P:h1")
-    assert "<code>" in d
-    assert "wdtt://2.26.80.168:56000:56001:0:P:h1" in d  # ios
-    assert "wdtt://2.26.80.168:56000:56001:9000:P:h1" in d  # android
-    # словарная ссылка (sub_url/wdtt JSON) не выводится
-    assert "https://sub/x" not in d
-    live = {"password_key": "P", "total_gb": 175, "traffic_used": 0,
-            "sub_url": "https://sub/x", "link": link,
-            "server_host": "2.26.80.168", "dtls_port": 56000,
-            "wg_port": 56001, "client_port": 9000, "expires": "Бессрочно"}
-    c = config_text(live, ["h1"], "WDTT")
-    assert "Твой конфиг" in c
-    assert "wdtt://2.26.80.168:56000:56001:9000:P:h1" in c  # android
-    assert "wdtt://2.26.80.168:56000:56001:0:P:h1" in c  # ios
-    cfg = wdtt_configs(live, ["h1"])
-    assert cfg["ios"] == "wdtt://2.26.80.168:56000:56001:0:P:h1"
-    assert cfg["android"] == "wdtt://2.26.80.168:56000:56001:9000:P:h1"
-    print("link-format OK")
+    short = copy_btn("Copy", "wdtt://short")
+    assert short.copy_text is not None
+
+    long = copy_btn("Copy", "wdtt://" + "x" * 300, cb="u:show:0")
+    assert long.copy_text is None
+    assert long.callback_data == "u:show:0"
+    print("copy limit OK")
 
 
 if __name__ == "__main__":
     test_config()
-    test_link()
-    test_utils()
+    test_helpers()
     test_keyboards()
-    test_styles()
-    test_link_format()
+    test_texts()
+    test_copy_limit()
     print("ALL_TESTS_OK")

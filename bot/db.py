@@ -2,16 +2,16 @@
 """MongoDB-слой проекта (motor).
 
 Коллекции:
-  users     — профили, счётчики активности, состояние подписки
-  channels  — обязательные каналы для подписки
-  ads       — рекламные кнопки в меню
-  settings  — глобальные настройки (слоты, лимиты, соглашение, ссылки)
-  events    — журнал событий (аудит)
+  users     — профили бота, привязка к пользователю панели
+  channels  — обязательные каналы
+  ads       — рекламные кнопки
+  settings  — глобальные настройки
+  events    — журнал событий
   tickets   — обращения в поддержку
-  sections  — динамические разделы (конструктор меню)
-
-Точка входа: ``Database(cfg)`` → ``await db.init()`` → ... → ``await db.close()``.
+  sections  — динамические разделы меню
 """
+from __future__ import annotations
+
 import logging
 import random
 import string
@@ -19,7 +19,7 @@ import time
 from datetime import datetime, timezone
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from pymongo import ReturnDocument, UpdateOne
+from pymongo import ReturnDocument
 
 from .config import Config
 
@@ -29,28 +29,31 @@ TICKET_STATUSES = ("open", "in_progress", "closed")
 
 
 def utcnow() -> datetime:
-    """Текущее время в UTC (timezone-aware)."""
     return datetime.now(timezone.utc)
 
 
 DEFAULT_SETTINGS: dict = {
-    "registration_open": True,    # False = режим «нет мест»
-    "slots_total": 0,             # 0 = без лимита мест
-    "default_total_gb": 175,      # лимит трафика новых подписок (0 = безлимит)
+    "registration_open": True,       # False = режим «нет мест»
+    "slots_total": 0,                # 0 = без лимита
+    "default_total_gb": 175,         # 0 = безлимит
     "default_max_devices": 2,
-    "reset_period_days": 30,      # период авто-сброса трафика (0 = выкл.)
-    "agreement_text": "",         # seed из texts.DEFAULT_AGREEMENT при init()
-    "app_links": [],              # [{label, url}] кнопки скачивания приложений
-    "support_chat_id": "",        # чат для пересылки тикетов (необязательно)
+    "default_expires_days": 0,       # 0 = бессрочно
+    "reset_period_days": 0,          # авто-сброс трафика, 0 = выкл.
+    "referral_bonus_gb": 5,
+    "nodes_copy_limit": 5,           # нод кнопками, остальные — в подписке
+    "agreement_text": "",            # seed из texts.DEFAULT_AGREEMENT
+    "app_links": [],                 # [{label, url}]
+    "support_chat_id": "",
 }
 
 
 class Database:
-    """Обёртка над MongoDB: пользователи, настройки, тикеты, разделы."""
+    """Обёртка над MongoDB."""
 
     def __init__(self, cfg: Config):
         self.client: AsyncIOMotorClient = AsyncIOMotorClient(cfg.mongo_uri)
         self.db: AsyncIOMotorDatabase = self.client[cfg.mongo_db]
+
         self.users = self.db["users"]
         self.channels = self.db["channels"]
         self.ads = self.db["ads"]
@@ -58,17 +61,14 @@ class Database:
         self.settings_col = self.db["settings"]
         self.tickets = self.db["tickets"]
         self.sections = self.db["sections"]
-        self.panel_users = self.db["panel_users"]   # зеркало пользователей панели
-        self.panel_state = self.db["panel_state"]   # inbound/main_password панели
 
-        # Кэш настроек: читаются на каждый рендер меню, меняются редко.
         self._settings_ttl = 20.0
         self._settings_cache: dict | None = None
         self._settings_cached_at = 0.0
 
     # ------------------------------------------------------------ lifecycle
+
     async def init(self):
-        """Индексы + первичный seed настроек (идемпотентно)."""
         await self.users.create_index("tg_id", unique=True)
         await self.users.create_index("registered")
         await self.users.create_index("created_at")
@@ -76,6 +76,7 @@ class Database:
         await self.users.create_index("username")
         await self.users.create_index("full_name")
         await self.users.create_index("first_name")
+        await self.users.create_index("panel_id")
         await self.channels.create_index("channel_id", unique=True)
         await self.channels.create_index("_ts_added")
         await self.ads.create_index("key", unique=True)
@@ -84,29 +85,25 @@ class Database:
         await self.tickets.create_index("ticket_id", unique=True)
         await self.tickets.create_index("tg_id")
         await self.sections.create_index("key", unique=True)
-        await self.panel_users.create_index("_pkey", unique=True)
-        await self.panel_users.create_index("password")
-        await self.panel_users.create_index("comment")
 
         from .texts import DEFAULT_AGREEMENT, DEFAULT_APP_LINKS
+
         await self.settings_col.update_one(
             {"_id": "main"},
-            {"$setOnInsert": {**DEFAULT_SETTINGS,
-                              "agreement_text": DEFAULT_AGREEMENT,
-                              "app_links": DEFAULT_APP_LINKS}},
+            {"$setOnInsert": {
+                **DEFAULT_SETTINGS,
+                "agreement_text": DEFAULT_AGREEMENT,
+                "app_links": DEFAULT_APP_LINKS,
+            }},
             upsert=True,
         )
 
     async def close(self):
         self.client.close()
 
-    # ------------------------------------------------------------- settings
-    async def get_settings(self) -> dict:
-        """Настройки, слитые с дефолтом (устойчиво к новым полям).
+    # ------------------------------------------------------------ settings
 
-        Значение кэшируется на ``_settings_ttl`` секунд и сбрасывается
-        при ``save_settings``.
-        """
+    async def get_settings(self) -> dict:
         now = time.monotonic()
 
         if (
@@ -121,13 +118,18 @@ class Database:
 
         self._settings_cache = merged
         self._settings_cached_at = time.monotonic()
-
         return dict(merged)
 
+    async def save_settings(self, patch: dict):
+        await self.settings_col.update_one(
+            {"_id": "main"}, {"$set": patch}, upsert=True
+        )
+        self._settings_cache = None
+        self._settings_cached_at = 0.0
 
-    # ---------------------------------------------------------------- users
+    # --------------------------------------------------------------- users
+
     async def sync_user(self, tg_user, source: str | None = None) -> dict:
-        """Обновить профиль по апдейту (upsert + счётчик сообщений)."""
         now = utcnow()
         update = {
             "$set": {
@@ -154,45 +156,56 @@ class Database:
             "$inc": {"messages_count": 1},
         }
         return await self.users.find_one_and_update(
-            {"tg_id": tg_user.id}, update, upsert=True,
-            return_document=ReturnDocument.AFTER)
+            {"tg_id": tg_user.id},
+            update,
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
 
     async def get_user(self, tg_id: int) -> dict | None:
         return await self.users.find_one({"tg_id": tg_id})
 
+    async def get_user_by_panel_id(self, panel_id: str) -> dict | None:
+        return await self.users.find_one({"panel_id": str(panel_id)})
+
     async def bump_callback(self, tg_id: int):
         await self.users.update_one(
-            {"tg_id": tg_id}, {"$inc": {"callbacks_count": 1}})
+            {"tg_id": tg_id}, {"$inc": {"callbacks_count": 1}}
+        )
 
     async def log_event(self, tg_id: int, kind: str, meta: str = ""):
-        """Аудит: одно событие — один документ."""
         try:
-            await self.events.insert_one(
-                {"tg_id": tg_id, "kind": kind, "meta": meta[:300],
-                 "ts": utcnow()})
-        except Exception:  # noqa: BLE001 — аудит не должен ломать flow
+            await self.events.insert_one({
+                "tg_id": tg_id,
+                "kind": kind,
+                "meta": (meta or "")[:300],
+                "ts": utcnow(),
+            })
+        except Exception:
             log.warning("log_event failed", exc_info=True)
 
     async def registered_count(self) -> int:
         return await self.users.count_documents({"registered": True})
 
     async def slots_available(self, settings: dict) -> tuple[bool, int]:
-        """(есть_ли_место, осталось). left == -1 — без лимита."""
         if not settings.get("registration_open", True):
             return False, 0
+
         total = int(settings.get("slots_total") or 0)
         if not total:
             return True, -1
+
         used = await self.registered_count()
         left = max(total - used, 0)
         return left > 0, left
 
+    # ------------------------------------------------------------- tickets
 
-    # -------------------------------------------------------------- tickets
     async def create_ticket(self, tg_id: int, subject: str, body: str) -> str:
-        """Создать обращение, вернуть короткий ID (6 символов A-Z0-9)."""
         for _ in range(10):
-            tid = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+            tid = "".join(
+                random.choices(string.ascii_uppercase + string.digits, k=6)
+            )
             if not await self.tickets.find_one({"ticket_id": tid}):
                 now = utcnow()
                 await self.tickets.insert_one({
@@ -214,14 +227,23 @@ class Database:
     async def append_ticket_message(self, ticket_id: str, author: str, text: str):
         await self.tickets.update_one(
             {"ticket_id": ticket_id},
-            {"$push": {"messages": {"author": author, "text": text[:2000],
-                                    "ts": utcnow()}},
-             "$set": {"updated_at": utcnow()}})
+            {
+                "$push": {
+                    "messages": {
+                        "author": author,
+                        "text": text[:2000],
+                        "ts": utcnow(),
+                    }
+                },
+                "$set": {"updated_at": utcnow()},
+            },
+        )
 
     async def set_ticket_status(self, ticket_id: str, status: str):
         await self.tickets.update_one(
             {"ticket_id": ticket_id},
-            {"$set": {"status": status, "updated_at": utcnow()}})
+            {"$set": {"status": status, "updated_at": utcnow()}},
+        )
 
     async def list_tickets(self, status: str | None = None,
                            limit: int = 50) -> list:
@@ -235,14 +257,16 @@ class Database:
         ).sort("updated_at", -1)]
 
     # ------------------------------------------------------------- sections
+
     async def get_section(self, key: str) -> dict | None:
         return await self.sections.find_one({"key": key})
 
     async def save_section(self, key: str, data: dict):
         data["key"] = key
         data["updated_at"] = utcnow()
-        await self.sections.update_one({"key": key}, {"$set": data},
-                                       upsert=True)
+        await self.sections.update_one(
+            {"key": key}, {"$set": data}, upsert=True
+        )
 
     async def delete_section(self, key: str):
         await self.sections.delete_one({"key": key})
@@ -250,15 +274,18 @@ class Database:
     async def list_sections(self) -> list:
         return [s async for s in self.sections.find().sort("key", 1)]
 
+    # ---------------------------------------------------------- registration
+
     async def claim_creating(
         self,
         tg_id: int,
         allow_recreate: bool = False,
         timeout_sec: int = 90,
     ) -> bool:
-        """Атомарный клейм создания подписки с защитой от залипания и гонок."""
         now = utcnow()
-        timeout_dt = datetime.fromtimestamp(now.timestamp() - timeout_sec, tz=timezone.utc)
+        timeout_dt = datetime.fromtimestamp(
+            now.timestamp() - timeout_sec, tz=timezone.utc
+        )
         query: dict = {
             "tg_id": tg_id,
             "$or": [
@@ -277,104 +304,7 @@ class Database:
         return res is not None
 
     async def release_creating(self, tg_id: int):
-        """Сброс флага создания подписки."""
         await self.users.update_one(
             {"tg_id": tg_id},
             {"$set": {"creating": False}, "$unset": {"creating_at": ""}},
         )
-
-    async def save_settings(self, patch: dict):
-        await self.settings_col.update_one(
-            {"_id": "main"}, {"$set": patch}, upsert=True)
-        self._settings_cache = None
-        self._settings_cached_at = 0.0
-
-    # ------------------------------------------------- panel users mirror
-
-    @staticmethod
-    def _panel_key(user: dict) -> str:
-        """Ключ пользователя панели: password_key, иначе password."""
-        return str(user.get("password_key") or user.get("password") or "").strip()
-
-    async def sync_panel_users(self, users: list, inbound: dict | None = None,
-                               main_password: str | None = None):
-        """Полностью синхронизирует зеркало ``panel_users`` со снапшотом панели.
-
-        - upsert по ``_pkey`` (password_key/password);
-        - удаляет записи, которых больше нет в снапшоте (только если снапшот
-          непустой — защита от транзиентного пустого ответа);
-        - сохраняет inbound/main_password в ``panel_state``.
-        """
-        now = utcnow()
-        ops = []
-        keys: list[str] = []
-
-        for u in (users or []):
-            if not isinstance(u, dict):
-                continue
-            key = self._panel_key(u)
-            if not key:
-                continue
-            doc = dict(u)
-            doc["_pkey"] = key
-            doc["updated_at"] = now
-            ops.append(UpdateOne({"_pkey": key}, {"$set": doc}, upsert=True))
-            keys.append(key)
-
-        if ops:
-            await self.panel_users.bulk_write(ops, ordered=False)
-
-        if keys:
-            await self.panel_users.delete_many({"_pkey": {"$nin": keys}})
-
-        state: dict = {"updated_at": now}
-        if inbound is not None:
-            state["inbound"] = inbound
-        if main_password is not None:
-            state["main_password"] = main_password
-        await self.panel_state.update_one(
-            {"_id": "state"}, {"$set": state}, upsert=True)
-
-    async def get_panel_user(self, key: str) -> dict | None:
-        """Ищет пользователя панели в зеркале (по паролю или комментарию)."""
-        if not key:
-            return None
-        return await self.panel_users.find_one(
-            {"$or": [{"_pkey": key}, {"comment": key}]})
-
-    async def get_panel_inbound(self) -> dict:
-        """Последний известный inbound панели (из зеркала)."""
-        doc = await self.panel_state.find_one({"_id": "state"}) or {}
-        return doc.get("inbound") or {}
-
-    async def upsert_panel_user(self, user: dict):
-        """Точечный upsert ОДНОЙ записи в зеркале.
-
-        В отличие от sync_panel_users — не удаляет остальных (для записи
-        только что созданного пользователя без парсинга всего списка).
-        """
-        key = self._panel_key(user)
-        if not key:
-            return
-        doc = dict(user)
-        doc["_pkey"] = key
-        doc["updated_at"] = utcnow()
-        await self.panel_users.update_one(
-            {"_pkey": key}, {"$set": doc}, upsert=True)
-
-    async def drop_panel_user(self, key: str):
-        """Удаляет запись из зеркала по любому из известных ключей."""
-        if not key:
-            return
-        await self.panel_users.delete_many({
-            "$or": [
-                {"_pkey": key},
-                {"password": key},
-                {"password_key": key},
-                {"comment": key},
-            ]
-        })
-
-    async def panel_mirror_updated_at(self):
-        doc = await self.panel_state.find_one({"_id": "state"}) or {}
-        return doc.get("updated_at")

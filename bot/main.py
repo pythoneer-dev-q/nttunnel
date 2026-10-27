@@ -1,18 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Точка входа бота.
-
-Запуск (любой из вариантов):
-  python -m bot.main
-  python run.py
-  python bot/main.py   # файл сам перезапустится в контексте пакета
-"""
+"""Точка входа бота."""
 import runpy
 import sys
 
 if not __package__:
-    # Файл запущен напрямую ("python bot/main.py") — относительные импорты
-    # не работают. Перезапускаем сами себя как модуль пакета bot.
     import os
+
     _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _ROOT not in sys.path:
         sys.path.insert(0, _ROOT)
@@ -36,13 +29,13 @@ from .handlers.common import router as common_router
 from .handlers.register import router as register_router
 from .handlers.support import router as support_router
 from .middlewares.check_sub import UserGate
-from .scheduler import _panel_sync_once, panel_sync_loop, run_scheduler
+from .scheduler import run_scheduler
 from .wdtt import WdttClient
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-# шибко болтливые библиотеки — приглушить
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 logging.getLogger("pymongo").setLevel(logging.WARNING)
 log = logging.getLogger("main")
@@ -51,31 +44,35 @@ log = logging.getLogger("main")
 async def main():
     if not config.bot_token:
         raise SystemExit(
-            "BOT_TOKEN не задан! Добавьте строку 'BOT-TOKEN = ваш_токен' в "
-            "creds.txt или пропишите BOT_TOKEN в .env (см. .env.example), "
-            "и укажите ADMINS.")
+            "BOT_TOKEN не задан. Заполни .env (см. .env.example)."
+        )
 
     db = Database(config)
     await db.init()
-    wdtt = WdttClient(config.panel_base, config.panel_username,
-                      config.panel_password, config.ssl_insecure)
-    wdtt.attach_store(db)          # зеркало пользователей панели в MongoDB
+
+    wdtt = WdttClient(
+        base_url=config.panel_base,
+        api_key=config.panel_api_key,
+        username=config.panel_username,
+        password=config.panel_password,
+        ssl_insecure=config.ssl_insecure,
+        timeout=config.panel_timeout,
+    )
+
     gate = UserGate(db)
     init_ctx(config, db, wdtt, gate)
 
-    bot = Bot(config.bot_token,
-              default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(
+        config.bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     dp = Dispatcher(storage=MemoryStorage())
-    dp["config"] = config          # для middleware (нужен admin_ids)
+    dp["config"] = config
     dp["admin_ids"] = config.admin_ids
 
-    # middleware гейта на все апдейты от пользователя
     dp.message.middleware(gate)
     dp.callback_query.middleware(gate)
 
-    # порядок важен: сначала админ-роутер (свой IsAdmin-фильтр),
-    # затем пользовательские; cabinet подключён последним, т.к. содержит
-    # текстовый fallback
     dp.include_router(admin_router)
     dp.include_router(register_router)
     dp.include_router(support_router)
@@ -85,30 +82,16 @@ async def main():
     try:
         me = await bot.get_me()
         log.info("Бот @%s запущен", me.username)
-    except Exception as e:  # noqa: BLE001
-        log.warning(
-            "Проверка токена не удалась (сеть?): %s — polling попробует снова", e
-        )
-
-    # Стартовый прогрев: один парсинг панели → in-memory + зеркало Mongo.
-    # Дальше все чтения идут локально, панель опрашивается раз в час.
-    # Апдейты до старта polling копятся в Telegram — юзеры не ждут.
-    try:
-        await asyncio.wait_for(_panel_sync_once(), timeout=90)
-        log.info("Панель: стартовое зеркало пользователей готово")
-    except Exception as e:  # noqa: BLE001 — панель может быть недоступна
-        log.warning(
-            "Стартовый sync панели не удался (%s) — читаем из прошлого "
-            "зеркала, следующая попытка через интервал sync", e)
+    except Exception as e:
+        log.warning("Проверка токена не удалась: %s", e)
 
     scheduler_task = asyncio.create_task(run_scheduler())
-    sync_task = asyncio.create_task(panel_sync_loop())
+
     try:
         await bot.delete_webhook(drop_pending_updates=False)
         await dp.start_polling(bot)
     finally:
         scheduler_task.cancel()
-        sync_task.cancel()
         await wdtt.close()
         await db.close()
 

@@ -55,7 +55,6 @@ async def cb_broadcast_start(cb: CallbackQuery, state: FSMContext):
         try:
             await cb.message.edit_text("⌨️ <b>Отправьте сообщение для рассылки</b>",
                                        reply_markup=adm_back_kb("adm"))
-            from aiogram.utils.keyboard import InlineKeyboardBuilder
         except Exception:  # noqa: BLE001
             pass
     await answer_or_alert(cb)
@@ -70,9 +69,8 @@ async def h_broadcast_content(message: Message, state: FSMContext,
     await state.update_data(src_chat=message.chat.id,
                             src_msg=message.message_id)
 
-    kb_msg = None
     try:
-        kb_msg = await message.copy_to(message.chat.id)  # превью
+        await message.copy_to(message.chat.id)  # превью
     except Exception as e:  # noqa: BLE001
         log.warning("preview copy failed: %s", e)
 

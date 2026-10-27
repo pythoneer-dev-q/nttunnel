@@ -1,18 +1,29 @@
 # -*- coding: utf-8 -*-
-"""Админка: пользователи — список, профили, блокировка, лимиты, сброс трафика."""
+"""Админка: пользователи панели — список, поиск, лимиты, блокировки."""
+from __future__ import annotations
+
 import logging
-import re
+import time
 
 from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ...context import app
-from ...keyboards import adm_back_kb, adm_root_kb
+from ...keyboards import adm_back_kb, copy_btn
 from ...texts import esc
-from ...utils import answer_or_alert, fmt_dt, safe_edit
+from ...utils import answer_or_alert, safe_edit, yes_no_kb
+from ...wdtt import (
+    expires_text,
+    extract_node_links,
+    human_bytes,
+    panel_tg_id,
+    traffic_bar,
+    user_status,
+)
 
 log = logging.getLogger(__name__)
 router = Router(name="adm-users")
@@ -25,28 +36,42 @@ class AdmUserStates(StatesGroup):
     search = State()
 
 
-def ua_cb(tg_id: int, act: str) -> str:
-    return f"adm:ua:{tg_id}:{act}"
+def _status_dot(user: dict) -> str:
+    status, key = user_status(user)
+    return {
+        "active": "🟢",
+        "blocked": "🚫",
+        "expired": "⌛",
+        "exceeded": "📵",
+    }.get(key, "⚪")
 
 
-def parse_ua(data: str) -> tuple[int, str]:
-    rest = data.removeprefix("adm:ua:")
-    tg_id_s, act = rest.split(":", 1)
-    return int(tg_id_s), act
+def _pct(user: dict) -> int:
+    try:
+        total = float(user.get("total_gb") or 0) * 1024 ** 3
+        used = float(user.get("traffic_used_bytes") or 0)
+        return int(min(used / total * 100, 100)) if total > 0 else 0
+    except (TypeError, ValueError):
+        return 0
 
 
-def _users_kb(page: int, pages: int, items: list):
-    """Список пользователей: профили, поиск и пагинация."""
+def _users_kb(page: int, pages: int, users: list):
     from aiogram.types import InlineKeyboardButton
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
 
     kb = InlineKeyboardBuilder()
-    for label, cbd in items:
-        kb.button(text=label[:64], callback_data=cbd)
-    kb.button(text="🔍 Найти пользователя", callback_data="adm:usr:find")
+
+    for user in users:
+        user_id = str(user.get("id") or "")
+        name = str(user.get("name") or user.get("comment") or user_id)[:28]
+        traffic = human_bytes(user.get("traffic_used_bytes"))
+        label = f"{_status_dot(user)} {name} · {traffic}"
+        kb.button(text=label[:64], callback_data=f"adm:usr:v:{user_id}")
+
+    kb.button(text="🔍 Поиск", callback_data="adm:usr:find")
+    kb.button(text="⬅️ В админку", callback_data="adm")
     kb.adjust(1)
 
-    nav: list = []
+    nav: list[InlineKeyboardButton] = []
     if page > 0:
         nav.append(InlineKeyboardButton(
             text="⬅️", callback_data=f"adm:usr:p{page - 1}"))
@@ -64,72 +89,48 @@ def _users_kb(page: int, pages: int, items: list):
 
 @router.callback_query(F.data == "adm:usr")
 @router.callback_query(F.data.startswith("adm:usr:p"))
-async def cb_users_list(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
+async def cb_users_list(cb: CallbackQuery, state: FSMContext | None = None):
+    if state:
+        await state.clear()
     if not cb.message:
         return await answer_or_alert(cb)
-    ctx = app()
 
     rest = cb.data.removeprefix("adm:usr").removeprefix(":p")
     page = int(rest) if rest.isdigit() else 0
 
-    # Пагинация на стороне MongoDB: не тянем всех пользователей в память.
-    total = await ctx.db.users.count_documents({})
+    try:
+        data = await app().wdtt.list_users(
+            limit=PAGE_SIZE, offset=page * PAGE_SIZE
+        )
+    except Exception as e:
+        await safe_edit(
+            cb.message,
+            f"🔌 Не удалось загрузить пользователей:\n"
+            f"<code>{esc(str(e)[:200])}</code>",
+            adm_back_kb("adm"),
+        )
+        return await answer_or_alert(cb)
+
+    total = int(data.get("total") or 0)
+    users = [u for u in data.get("users") or [] if isinstance(u, dict)]
     pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
     page = min(max(page, 0), pages - 1)
 
-    docs = [d async for d in ctx.db.users.find(
-        {},
-        {"tg_id": 1, "username": 1, "first_name": 1,
-         "blocked": 1, "registered": 1},
-    ).sort("created_at", -1).skip(page * PAGE_SIZE).limit(PAGE_SIZE)]
-
     lines = []
-    items = []
-    for u in docs:
-        marks = ("🚫" if u.get("blocked") else "") + \
-                ("🔐" if u.get("registered") else "")
-        label = (u.get("username") or u.get("first_name") or
-                 f"id{u['tg_id']}")[:30]
-        lines.append(f"{marks} <b>{esc(label)}</b> · {u['tg_id']}")
-        items.append((f"👤 {label} · {u['tg_id']}", f"adm:usr:v{u['tg_id']}"))
-    text = (f"👥 <b>Пользователи</b> — всего {total}\n\n"
-            + ("\n".join(lines) if lines else "Пусто."))
-    await safe_edit(cb.message, text, _users_kb(page, pages, items))
+    for user in users:
+        name = esc(user.get("name") or user.get("comment") or user.get("id"))
+        used = human_bytes(user.get("traffic_used_bytes"))
+        total_gb = user.get("total_gb") or 0
+        tail = f"/{float(total_gb):.0f} ГБ" if total_gb else "/∞"
+        lines.append(f"{_status_dot(user)} <b>{name}</b> · {used}{tail}")
+
+    text = (
+        f"👥 <b>Пользователи панели</b> · {total}\n\n"
+        + ("\n".join(lines) if lines else "Пусто.")
+    )
+
+    await safe_edit(cb.message, text, _users_kb(page, pages, users))
     await answer_or_alert(cb)
-
-
-async def _search_users(query: str, limit: int = 10) -> list:
-    """Поиск пользователей через индексированные запросы.
-
-    Никакого перебора всех пользователей: сначала точные попадания по
-    уникальному/обычному индексу, затем префиксный (anchored regex) поиск
-    с жёстким лимитом.
-    """
-    ctx = app()
-    q = (query or "").strip()
-    if not q:
-        return []
-
-    # 1) числовой tg_id — уникальный индекс
-    if q.lstrip("-").isdigit():
-        u = await ctx.db.get_user(int(q))
-        return [u] if u else []
-
-    name = q.lstrip("@").strip()
-
-    # 2) точный username — индекс
-    if name:
-        u = await ctx.db.users.find_one({"username": name})
-        if u:
-            return [u]
-
-    # 3) префиксный поиск (regex с ^ — использует индекс), с лимитом
-    rx = {"$regex": "^" + re.escape(name)}
-    cursor = ctx.db.users.find(
-        {"$or": [{"username": rx}, {"full_name": rx}, {"first_name": rx}]},
-    ).sort("created_at", -1).limit(limit)
-    return [d async for d in cursor]
 
 
 @router.callback_query(F.data == "adm:usr:find")
@@ -138,229 +139,292 @@ async def cb_users_find(cb: CallbackQuery, state: FSMContext):
     if cb.message:
         await safe_edit(
             cb.message,
-            "🔍 <b>Поиск пользователя</b>\n\n"
-            "Пришлите одно из:\n"
-            "• <code>tg_id</code> (число)\n"
-            "• <code>@username</code>\n"
-            "• начало имени",
-            adm_back_kb("adm:usr"))
-    await answer_or_alert(cb, "Жду запрос ⌨️")
+            "🔍 <b>Поиск</b>\n\n"
+            "Пришли имя, комментарий, пароль или <code>tg_id</code>.",
+            adm_back_kb("adm:usr"),
+        )
+    await answer_or_alert(cb, "Жду запрос")
+
+
+async def _search(query: str) -> list:
+    ctx = app()
+    found: list = []
+    seen: set[str] = set()
+
+    queries = [query]
+    if query.lstrip("-").isdigit():
+        queries = [f"tg{query}", f"tg_{query}", query]
+
+    for q in queries:
+        try:
+            data = await ctx.wdtt.list_users(q=q, limit=10)
+        except Exception:
+            continue
+
+        for user in data.get("users") or []:
+            if not isinstance(user, dict):
+                continue
+            user_id = str(user.get("id") or "")
+            if user_id and user_id not in seen:
+                seen.add(user_id)
+                found.append(user)
+
+    return found[:10]
 
 
 @router.message(StateFilter(AdmUserStates.search), F.text)
 async def h_users_search(message: Message, state: FSMContext):
-    q = (message.text or "").strip()
+    query = (message.text or "").strip()
     await state.clear()
 
-    if not q or q.startswith("/"):
+    if not query or query.startswith("/"):
         return
 
-    found = await _search_users(q, limit=10)
+    found = await _search(query)
 
     if not found:
-        await message.answer(
-            f"❌ Никого не найдено: <code>{esc(q)}</code>",
-            reply_markup=adm_back_kb("adm:usr"))
-        return
+        return await message.answer(
+            f"❌ Ничего не найдено: <code>{esc(query)}</code>",
+            reply_markup=adm_back_kb("adm:usr"),
+        )
 
     if len(found) == 1:
-        text, kb = await profile_text(found[0]["tg_id"])
-        await message.answer(text, reply_markup=kb)
-        return
-
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
+        user_id = str(found[0].get("id") or "")
+        text, kb = await profile_text(user_id)
+        return await message.answer(text, reply_markup=kb)
 
     kb = InlineKeyboardBuilder()
     lines = []
-    for u in found:
-        label = (u.get("username") or u.get("full_name") or
-                 u.get("first_name") or f"id{u['tg_id']}")
-        label = str(label)[:30]
-        lines.append(f"• <b>{esc(label)}</b> · {u['tg_id']}")
-        kb.button(text=f"👤 {label} · {u['tg_id']}",
-                  callback_data=f"adm:usr:v{u['tg_id']}")
+    for user in found:
+        user_id = str(user.get("id") or "")
+        label = str(user.get("name") or user.get("comment") or user_id)[:30]
+        used = human_bytes(user.get("traffic_used_bytes"))
+        lines.append(f"{_status_dot(user)} <b>{esc(label)}</b> · {used}")
+        kb.button(text=f"{_status_dot(user)} {label}"[:64],
+                  callback_data=f"adm:usr:v:{user_id}")
+
     kb.button(text="⬅️ К списку", callback_data="adm:usr")
     kb.adjust(1)
 
     await message.answer(
-        f"🔍 <b>Найдено ({len(found)})</b>:\n\n" + "\n".join(lines),
-        reply_markup=kb.as_markup())
+        f"🔍 <b>Найдено: {len(found)}</b>\n\n" + "\n".join(lines),
+        reply_markup=kb.as_markup(),
+    )
 
 
-@router.callback_query(F.data.startswith("adm:usr:v"))
+@router.callback_query(F.data.startswith("adm:usr:v:"))
 async def cb_user_profile(cb: CallbackQuery):
     if not cb.message:
         return await answer_or_alert(cb)
-    tg_id = int(cb.data.removeprefix("adm:usr:v"))
-    text, kb = await profile_text(tg_id)
+
+    user_id = cb.data.removeprefix("adm:usr:v:")
+    text, kb = await profile_text(user_id)
     await safe_edit(cb.message, text, kb)
     await answer_or_alert(cb)
 
 
-async def profile_text(tg_id: int):
-    ctx = app()
-    u = await ctx.db.get_user(tg_id)
-    if not u:
-        return f"❌ Пользователь {tg_id} не найден.", adm_back_kb("adm:usr")
-
-    live = None
-    pwd = u.get("wdtt_password")
-    if u.get("registered") and pwd:
-        # Без force: читаем кэш/зеркало (мгновенно). Свежесть — часовой
-        # sync плюс точечные обновления после админ-действий.
-        try:
-            live = await ctx.wdtt.find_user(pwd)
-        except Exception as e:  # noqa: BLE001 — панель может быть недоступна
-            log.warning("profile find_user failed tg=%s: %s", tg_id, e)
-            live = None
-
-    name = u.get("full_name") or ""
-    username = "@" + u["username"] if u.get("username") else "—"
-    line = (
-        "👤 <b>Профиль пользователя</b>\n\n"
-        f"🆔 ID: <code>{u['tg_id']}</code>\n"
-        f"📝 Имя: <b>{esc(name)}</b>\n"
-        f"🔗 Username: <b>{username}</b>\n"
-        f"🌐 Язык: {u.get('language_code') or '—'} · "
-        f"Premium: {'💎' if u.get('is_premium') else '—'}\n"
-        f"📅 В боте с: {fmt_dt(u.get('created_at'))}\n"
-        f"👀 Активность: {fmt_dt(u.get('last_seen'))}\n"
-        f"💬 Сообщений: {u.get('messages_count', 0)} · "
-        f"нажатий: {u.get('callbacks_count', 0)}\n"
-        f"🔗 Источник /start: <code>{esc(u.get('start_payload') or '—')}</code>\n"
+def _traffic_block(user: dict) -> str:
+    bar, used, total, pct = traffic_bar(
+        user.get("traffic_used_bytes"), user.get("total_gb")
     )
-    status = []
-    if u.get("blocked"):
-        status.append("🚫 заблокирован в боте")
-    if not u.get("registered"):
-        status.append("❌ подписка не создана")
-    if live is not None and not live.get("active", True):
-        status.append("🔴 подписка деактивирована в панели")
-    if status:
-        line += "\n⚠️ " + "; ".join(status) + "\n"
+    if total == "∞":
+        return f"📊 <b>{used}</b> · безлимит"
+    return f"📊 <b>{used}</b> / {total} · <b>{pct}%</b>\n<code>{bar}</code>"
 
-    if u.get("registered"):
-        used = (live or {}).get("traffic_used_fmt", "?")
-        gb = (live or {}).get("total_gb", u.get("sub_total_gb", 0))
-        dev = (live or {}).get("devices_bound", "?")
-        maxd = (live or {}).get("max_devices", u.get("sub_max_devices", "?"))
-        line += (
-            "\n🔌 <b>Подключение WDTT</b>\n"
-            f"🔑 Пароль/ID: <code>{esc(pwd)}</code>\n"
-            f"📊 Трафик: <b>{used}</b> из <b>{gb if gb else '∞'}</b>\n"
-            f"📱 Устройств: <b>{dev}</b>/<b>{maxd}</b>\n"
-            f"🟢 Онлайн: {'да' if (live or {}).get('online') else 'нет'}\n"
-            f"🔑 Ключ: <code>{esc((live or {}).get('link') or u.get('wdtt_link', ''))}</code>\n"
+
+async def profile_text(user_id: str):
+    ctx = app()
+
+    try:
+        user = await ctx.wdtt.get_user(user_id, force=True)
+    except Exception as e:
+        return (
+            f"❌ Не удалось получить пользователя:\n"
+            f"<code>{esc(str(e)[:200])}</code>",
+            adm_back_kb("adm:usr"),
         )
 
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    if not user:
+        return f"❌ Пользователь {esc(user_id)} не найден.", adm_back_kb("adm:usr")
+
+    status, _key = user_status(user)
+    password = user.get("password") or "—"
+    comment = user.get("comment") or "—"
+    sub_url = user.get("subscription_url") or user.get("sub_url") or ""
+    tg_id = panel_tg_id(user)
+
+    try:
+        links = extract_node_links(user, await ctx.wdtt.list_nodes())
+    except Exception:
+        links = extract_node_links(user)
+
+    lines = [
+        f"👤 <b>{esc(user.get('name') or user_id)}</b>",
+        "",
+        f"ID: <code>{esc(user.get('id') or user_id)}</code>",
+        f"Пароль: <code>{esc(password)}</code>",
+        f"Комментарий: {esc(comment)}",
+        "",
+        _traffic_block(user),
+        "",
+        f"📅 {expires_text(user.get('expires_at'))} · "
+        f"👥 {user.get('devices_bound') or 0}/{user.get('max_devices') or '?'}",
+        f"Статус: <b>{status}</b>",
+        f"🌍 Нод: <b>{len(links)}</b>",
+    ]
+
+    if tg_id:
+        lines.append(f"💬 Telegram: <code>{tg_id}</code>")
+
+    if sub_url:
+        lines.append(f"\n<code>{esc(sub_url)}</code>")
+
     kb = InlineKeyboardBuilder()
-    if u.get("registered"):
-        kb.button(text="📈 Лимит трафика (GB)", callback_data=ua_cb(tg_id, "gb"))
-        kb.button(text="📱 Лимит устройств", callback_data=ua_cb(tg_id, "dev"))
-        kb.button(text="♻️ Сбросить трафик", callback_data=ua_cb(tg_id, "rst"))
-        kb.button(text="🗑 Удалить подписку", callback_data=ua_cb(tg_id, "del1"))
-    block_act, block_lbl = (("ub", "✅ Разблокировать") if u.get("blocked")
-                            else ("b", "🚫 Заблокировать"))
-    kb.button(text=block_lbl, callback_data=ua_cb(tg_id, block_act))
-    kb.button(text="✉️ Написать пользователю", callback_data=ua_cb(tg_id, "msg"))
-    kb.button(text="🔄 Обновить", callback_data=f"adm:usr:v{tg_id}")
+    kb.row(copy_btn("📋 Пароль", password))
+    kb.button(text="📈 Лимит ГБ", callback_data=f"adm:ua:{user_id}:gb")
+    kb.button(text="📱 Устройства", callback_data=f"adm:ua:{user_id}:dev")
+    kb.button(text="📅 Срок", callback_data=f"adm:ua:{user_id}:exp")
+    kb.button(text="♻️ Сбросить трафик", callback_data=f"adm:ua:{user_id}:rst")
+
+    if user.get("active") is False or user.get("is_deactivated"):
+        kb.button(text="✅ Разблокировать", callback_data=f"adm:ua:{user_id}:ub")
+    else:
+        kb.button(text="🚫 Заблокировать", callback_data=f"adm:ua:{user_id}:b")
+
+    if tg_id:
+        kb.button(text="✉️ Написать", callback_data=f"adm:ua:{user_id}:msg")
+
+    kb.button(text="🗑 Удалить", callback_data=f"adm:ua:{user_id}:del1")
+    kb.button(text="🔄 Обновить", callback_data=f"adm:usr:v:{user_id}")
     kb.button(text="⬅️ К списку", callback_data="adm:usr")
     kb.adjust(1)
-    return line, kb.as_markup()
+
+    return "\n".join(lines), kb.as_markup()
+
+
+def _parse_action(data: str) -> tuple[str, str]:
+    rest = data.removeprefix("adm:ua:")
+    user_id, _, action = rest.rpartition(":")
+    return user_id, action
+
+
+PROMPTS = {
+    "gb": "📈 <b>Лимит трафика</b>\n\n"
+          "Пришли ГБ (0 — безлимит):",
+    "dev": "📱 <b>Лимит устройств</b>\n\n"
+           "Пришли число устройств:",
+    "exp": "📅 <b>Срок действия</b>\n\n"
+           "Пришли дней (0 — бессрочно):",
+    "msg": "✉️ <b>Сообщение</b>\n\n"
+           "Пришли текст — он уйдёт пользователю в Telegram.",
+}
 
 
 @router.callback_query(F.data.startswith("adm:ua:"))
 async def cb_user_action(cb: CallbackQuery, state: FSMContext):
     if not cb.message:
         return await answer_or_alert(cb)
+
+    user_id, action = _parse_action(cb.data)
     ctx = app()
-    tg_id, act = parse_ua(cb.data)
-    u = await ctx.db.get_user(tg_id) or {}
 
-    # ---- ввод через FSM (лимиты, сообщение)
-    if act in ("gb", "dev", "msg"):
-        prompts = {
-            "gb": f"📈 Введите лимит трафика для <b>{tg_id}</b> в GB (0 — безлимит):",
-            "dev": f"📱 Введите лимит устройств для <b>{tg_id}</b> (число):",
-            "msg": f"✉️ Введите текст сообщения для <b>{esc(u.get('full_name') or tg_id)}</b>:",
-        }
-        await state.set_state(AdmUserStates.wait_input)
-        await state.update_data(target=tg_id, action=act)
-        from aiogram.utils.keyboard import InlineKeyboardBuilder
-        kb = InlineKeyboardBuilder()
-        kb.button(text="❌ Отмена", callback_data="adm:cancel")
+    if action in PROMPTS:
+        tg_id = None
         try:
-            await cb.message.edit_text(prompts[act], reply_markup=kb.as_markup())
-            await answer_or_alert(cb, "Жду ввод ⌨️")
-        except Exception:  # noqa: BLE001
-            await answer_or_alert(
-                cb, prompts[act].replace("<b>", "").replace("</b>", ""), True)
-        return
+            user = await ctx.wdtt.get_user(user_id, force=True)
+            tg_id = panel_tg_id(user)
+        except Exception:
+            user = {}
 
-    # ---- блокировка / разблокировка
-    if act in ("b", "ub"):
-        blocking = act == "b"
-        try:
-            if u.get("registered") and u.get("wdtt_password"):
-                await ctx.wdtt.update_user(u["wdtt_password"],
-                                           active=not blocking)
-        except Exception as e:  # noqa: BLE001
-            log.warning("wdtt active toggle failed: %s", e)
-        await ctx.db.users.update_one({"tg_id": tg_id},
-                                      {"$set": {"blocked": blocking}})
-        await ctx.db.log_event(tg_id,
-                               "blocked" if blocking else "unblocked",
-                               "by admin")
-        text, kb = await profile_text(tg_id)
-        await safe_edit(cb.message, text, kb)
-        await answer_or_alert(
-            cb, "🚫 Заблокирован" if blocking else "✅ Разблокирован")
-        return
-
-    # ---- сброс трафика
-    if act == "rst":
-        if not u.get("wdtt_password"):
+        if action == "msg" and not tg_id:
             return await answer_or_alert(
-                cb, "У пользователя нет пароля в панели", True)
+                cb, "У пользователя нет Telegram ID в комментарии", True
+            )
+
+        await state.set_state(AdmUserStates.wait_input)
+        await state.update_data(target=user_id, action=action, tg_id=tg_id)
+
+        kb = InlineKeyboardBuilder()
+        kb.button(text="❌ Отмена", callback_data=f"adm:usr:v:{user_id}")
+        await safe_edit(cb.message, PROMPTS[action], kb.as_markup())
+        return await answer_or_alert(cb, "Жду ввод")
+
+    if action in ("b", "ub"):
+        blocking = action == "b"
         try:
-            await ctx.wdtt.reset_traffic(u["wdtt_password"])
-            await ctx.db.log_event(tg_id, "traffic_reset", "by admin")
-            await answer_or_alert(cb, "♻️ Трафик сброшен")
-        except Exception as e:  # noqa: BLE001
+            if blocking:
+                await ctx.wdtt.block_user(user_id)
+            else:
+                await ctx.wdtt.activate_user(user_id)
+            await ctx.db.log_event(
+                cb.from_user.id, "admin",
+                f"{'block' if blocking else 'unblock'} {user_id}",
+            )
+            await answer_or_alert(
+                cb, "🚫 Заблокирован" if blocking else "✅ Разблокирован"
+            )
+        except Exception as e:
             await answer_or_alert(cb, f"Ошибка: {str(e)[:150]}", True)
-            return
-        text, kb = await profile_text(tg_id)
+
+        text, kb = await profile_text(user_id)
         await safe_edit(cb.message, text, kb)
         return
 
-    # ---- удаление подписки (два шага)
-    if act == "del1":
-        from ...utils import yes_no_kb
+    if action == "rst":
+        try:
+            await ctx.wdtt.reset_traffic(user_id)
+            await ctx.db.log_event(
+                cb.from_user.id, "admin", f"traffic reset {user_id}"
+            )
+            await answer_or_alert(cb, "♻️ Трафик сброшен")
+        except Exception as e:
+            return await answer_or_alert(cb, f"Ошибка: {str(e)[:150]}", True)
+
+        text, kb = await profile_text(user_id)
+        await safe_edit(cb.message, text, kb)
+        return
+
+    if action == "del1":
         await safe_edit(
             cb.message,
-            f"🗑 <b>Удалить подписку</b> пользователя {tg_id}?\n\n"
-            "Пользователь будет удалён из панели WDTT безвозвратно.",
-            yes_no_kb(None, ua_cb(tg_id, "del2"), f"adm:usr:v{tg_id}",
-                      "🗑 Да, удалить", "❌ Отмена"))
-        await answer_or_alert(cb)
-        return
+            f"🗑 <b>Удалить пользователя</b>\n\n<code>{esc(user_id)}</code>\n\n"
+            "Удаление безвозвратное.",
+            yes_no_kb(
+                "", f"adm:ua:{user_id}:del2", f"adm:usr:v:{user_id}",
+                "🗑 Удалить", "❌ Отмена",
+            ),
+        )
+        return await answer_or_alert(cb)
 
-    if act == "del2":
+    if action == "del2":
         try:
-            if u.get("wdtt_password"):
-                await ctx.wdtt.delete_user(u["wdtt_password"])
-        except Exception as e:  # noqa: BLE001
-            log.warning("delete wdtt user: %s", e)
-        await ctx.db.users.update_one(
-            {"tg_id": tg_id},
-            {"$set": {"registered": False},
-             "$unset": {"wdtt_password": "", "wdtt_link": "",
-                        "sub_total_gb": "", "sub_max_devices": ""}})
-        await ctx.db.log_event(tg_id, "subscription_deleted", "by admin")
-        text, kb = await profile_text(tg_id)
-        await safe_edit(cb.message, text, kb)
-        await answer_or_alert(cb, "🗑 Удалено")
+            await ctx.wdtt.delete_user(user_id)
+            await ctx.db.users.update_one(
+                {"panel_id": user_id},
+                {
+                    "$set": {"registered": False},
+                    "$unset": {"panel_id": "", "panel_password": "",
+                               "panel_link": "", "panel_snapshot_at": ""},
+                },
+            )
+            await ctx.db.log_event(
+                cb.from_user.id, "admin", f"user deleted {user_id}"
+            )
+            await answer_or_alert(cb, "🗑 Удалено")
+        except Exception as e:
+            await answer_or_alert(cb, f"Ошибка: {str(e)[:150]}", True)
+
+        try:
+            data = await ctx.wdtt.list_users(limit=PAGE_SIZE)
+            users = data.get("users") or []
+        except Exception:
+            users = []
+
+        await safe_edit(
+            cb.message,
+            "🗑 Пользователь удалён.",
+            _users_kb(0, 1, users),
+        )
         return
 
     await answer_or_alert(cb, "Неизвестное действие")
@@ -370,11 +434,13 @@ async def cb_user_action(cb: CallbackQuery, state: FSMContext):
 async def cb_cancel_input(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await state.clear()
-    tg_id = data.get("target")
-    if tg_id:
-        text, kb = await profile_text(tg_id)
+
+    user_id = data.get("target")
+    if user_id:
+        text, kb = await profile_text(user_id)
     else:
-        text, kb = "🛠 <b>Админ-панель</b>", adm_root_kb()
+        text, kb = "🛠 <b>Админка</b>", adm_back_kb("adm")
+
     if cb.message:
         await safe_edit(cb.message, text, kb)
     await answer_or_alert(cb, "Отменено")
@@ -383,39 +449,53 @@ async def cb_cancel_input(cb: CallbackQuery, state: FSMContext):
 @router.message(StateFilter(AdmUserStates.wait_input), F.text)
 async def h_wait_input(message: Message, state: FSMContext):
     data = await state.get_data()
-    target, action = data.get("target"), data.get("action")
+    target = data.get("target")
+    action = data.get("action")
+    tg_id = data.get("tg_id")
     raw = (message.text or "").strip()
     await state.clear()
 
+    if not target or not action:
+        return
+
+    ctx = app()
+
     if action == "msg":
+        if not tg_id:
+            return await message.answer("❌ Нет Telegram ID.")
         try:
-            await message.bot.send_message(target, raw)
+            await message.bot.send_message(tg_id, raw)
+            await ctx.db.log_event(tg_id, "admin_dm", raw[:80])
             await message.answer("✅ Сообщение отправлено.")
-            await app().db.log_event(target, "admin_dm", raw[:80])
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             await message.answer(f"❌ Не удалось отправить: {str(e)[:150]}")
         return
 
     if not raw.lstrip("-").isdigit():
-        await message.answer("❌ Нужны цифры. Попробуйте снова через профиль.")
-        return
-    val = int(raw)
-    ctx = app()
-    u = await ctx.db.get_user(target) or {}
+        return await message.answer("❌ Нужно целое число.")
+
+    value = max(0, int(raw))
+
     try:
         if action == "gb":
-            await ctx.wdtt.update_user(u["wdtt_password"], total_gb=val)
-            await ctx.db.users.update_one({"tg_id": target},
-                                          {"$set": {"sub_total_gb": val}})
-            await ctx.db.log_event(target, "limit_gb_changed", str(val))
-            await message.answer(f"✅ Лимит трафика {target} → {val} GB")
+            await ctx.wdtt.update_user(target, total_gb=value)
+            await ctx.db.log_event(target, "limit_gb_changed", str(value))
+            text = f"✅ Лимит трафика: {value or '∞'} ГБ"
+
         elif action == "dev":
-            await ctx.wdtt.update_user(u["wdtt_password"], max_devices=val)
-            await ctx.db.users.update_one({"tg_id": target},
-                                          {"$set": {"sub_max_devices": val}})
-            await ctx.db.log_event(target, "limit_devices_changed", str(val))
-            await message.answer(f"✅ Лимит устройств {target} → {val}")
-    except Exception as e:  # noqa: BLE001
+            await ctx.wdtt.update_user(target, max_devices=max(1, value))
+            await ctx.db.log_event(target, "limit_devices_changed", str(value))
+            text = f"✅ Устройств: {max(1, value)}"
+
+        elif action == "exp":
+            expires_at = int(time.time()) + value * 86400 if value > 0 else 0
+            await ctx.wdtt.update_user(target, expires_at=expires_at)
+            await ctx.db.log_event(target, "expires_changed", str(value))
+            text = f"✅ Срок: {value} дн." if value else "✅ Срок: бессрочно"
+
+        else:
+            text = "✅ Сохранено"
+
+        await message.answer(text)
+    except Exception as e:
         await message.answer(f"❌ Ошибка панели: {str(e)[:200]}")
-
-

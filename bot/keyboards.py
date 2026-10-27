@@ -1,7 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Все inline-клавиатуры."""
+"""Inline-клавиатуры бота.
+
+Дизайн лаконичный: одна-две кнопки в ряд, без визуального шума.
+Ссылки на ноды копируются кнопками ``CopyTextButton``.
+"""
+from __future__ import annotations
 
 from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
+
+COPY_TEXT_LIMIT = 256
 
 
 def btn(
@@ -10,12 +17,12 @@ def btn(
     url: str | None = None,
     style: str | None = None,
 ) -> InlineKeyboardButton:
-    kwargs = {"text": text[:64]}
+    kwargs: dict = {"text": text[:64]}
 
     if url:
         kwargs["url"] = url
     else:
-        kwargs["callback_data"] = cb or "noop"
+        kwargs["callback_data"] = (cb or "noop")[:64]
 
     if style:
         kwargs["style"] = style
@@ -27,353 +34,334 @@ def btn(
         return InlineKeyboardButton(**kwargs)
 
 
-def copy_btn(text: str, value: str):
-    return InlineKeyboardButton(text=text, copy_text=CopyTextButton(text=value))
-
+def copy_btn(text: str, value: str, cb: str = "noop") -> InlineKeyboardButton:
+    """Кнопка «скопировать». Длинную ссылку показываем по callback."""
+    value = (value or "").strip()
+    if value and len(value.encode("utf-8")) <= COPY_TEXT_LIMIT:
+        return InlineKeyboardButton(
+            text=text[:64],
+            copy_text=CopyTextButton(text=value),
+        )
+    return btn(text, cb=cb)
 
 
 def markup(*rows: list[InlineKeyboardButton]) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[row for row in rows if row]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[row for row in rows if row])
 
 
 # --------------------------------------------------------------- меню
 
-def menu_kb(registered: bool, ads: list,
-            sections: list | None = None) -> InlineKeyboardMarkup:
-    rows = []
+
+def menu_kb(
+    registered: bool,
+    ads: list | None = None,
+    sections: list | None = None,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
 
     if registered:
         rows.append([
-            btn("📱 Трафик", "u:traffic"),
-            btn("🆘 Поддержка", "u:support"),
+            btn("📱 Мой доступ", "u:access", style="primary"),
+            btn("📦 Подписка", "u:sub"),
         ])
         rows.append([
+            btn("🏳️ Инструкция", "u:apps"),
             btn("🚀 Рефералка", "u:ref", style="success"),
-            btn("👤 Кабинет", "u:cab"),
+        ])
+        rows.append([
+            btn("🆘 Поддержка", "u:support"),
+            btn("👤 Профиль", "u:cab"),
         ])
     else:
-        rows.append([
-            btn("💾 Создать подписку", "u:reg", style="success")
-        ])
+        rows.append([btn("🔑 Создать доступ", "u:reg", style="success")])
+        rows.append([btn("🏳️ Инструкция", "u:apps")])
 
-    # динамические разделы (конструктор из админки) — по 2 в ряд
     for i in range(0, len(sections or []), 2):
         pair = sections[i:i + 2]
-        rows.append([btn(f"📂 {s.get('title') or s['key']}",
-                         f"u:sec:{s['key']}") for s in pair])
+        rows.append([
+            btn(f"📂 {s.get('title') or s.get('key')}", f"u:sec:{s.get('key')}")
+            for s in pair
+        ])
 
-    rows.append([
-        btn("🏳️ Инструкция", "u:apps"),
-    ])
-
-    rows.extend(
-        [btn(str(ad.get("title", "Реклама")), url=ad["url"])]
-        for ad in ads
-        if ad.get("url")
-    )
+    for ad in ads or []:
+        if ad.get("url"):
+            rows.append([btn(str(ad.get("title") or "Реклама"), url=ad["url"])])
 
     return markup(*rows)
 
 
 def back_menu_kb() -> InlineKeyboardMarkup:
-    return markup([
-        btn("↩️ В меню", "u:menu"),
-    ])
+    return markup([btn("↩️ В меню", "u:menu")])
+
+
+def menu_back_kb(sections: list | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+
+    for i in range(0, len(sections or []), 2):
+        pair = sections[i:i + 2]
+        rows.append([
+            btn(f"📂 {s.get('title') or s.get('key')}", f"u:sec:{s.get('key')}")
+            for s in pair
+        ])
+
+    rows.append([btn("↩️ В меню", "u:menu")])
+    return markup(*rows)
 
 
 def support_kb() -> InlineKeyboardMarkup:
     return markup(
-        [btn("📝 Написать обращение", "u:ticket:new", style="primary")],
+        [btn("📝 Новое обращение", "u:ticket:new", style="primary")],
         [btn("📬 Мои обращения", "u:ticket:list")],
         [btn("↩️ В меню", "u:menu")],
     )
 
 
-# ------------------------------------------------------ нет конфига
+# ------------------------------------------------------ доступ / подписка
+
 
 def no_config_kb() -> InlineKeyboardMarkup:
-    return markup([
-        btn("💾 Создать конфиг", "u:reg", style="success"),
-        btn("↩️ Назад", "u:menu"),
-    ])
+    return markup(
+        [btn("🔑 Создать доступ", "u:reg", style="success")],
+        [btn("↩️ В меню", "u:menu")],
+    )
 
 
 def panel_down_kb() -> InlineKeyboardMarkup:
-    """Панель недоступна: только обновление/выход, без создания конфига."""
     return markup(
-        [btn("🔄 Обновить", "u:traffic", style="primary")],
-        [
-            btn("↩️ В меню", "u:menu"),
-        ],
+        [btn("🔄 Повторить", "u:access", style="primary")],
+        [btn("↩️ В меню", "u:menu")],
     )
 
 
 def config_missing_kb() -> InlineKeyboardMarkup:
-    """Подписка в боте есть, а в панели нет — разрешаем пересоздать."""
     return markup(
-        [btn("♻️ Пересоздать конфиг", "u:reg", style="success")],
-        [
-            btn("🔄 Обновить", "u:traffic"),
-            btn("↩️ В меню", "u:menu"),
-        ],
+        [btn("♻️ Пересоздать доступ", "u:reg", style="success")],
+        [btn("🔄 Повторить", "u:access"), btn("↩️ В меню", "u:menu")],
     )
 
 
-# ------------------------------------------------------ флоу регистрации
+def access_kb(
+    links: list | None = None,
+    sub_url: str = "",
+    shown: int = 5,
+    total_nodes: int | None = None,
+) -> InlineKeyboardMarkup:
+    """Кнопки копирования нод + подписка.
 
-def step_app_kb() -> InlineKeyboardMarkup:
-    return markup(
-        [btn("📱 Android / iPhone — WDTT", "u:app:WDTT", style="primary")],
-        [btn("↩️ Отменить создание", "u:menu", style="danger")],
-    )
+    ``links`` — список ``{"name", "link"}``. Первые ``shown`` ссылок
+    копируются кнопками, остальные доступны в подписке.
+    """
+    links = links or []
+    total = total_nodes if total_nodes is not None else len(links)
+    rows: list[list[InlineKeyboardButton]] = []
 
-
-def agreement_kb() -> InlineKeyboardMarkup:
-    return markup(
-        [btn("✅ Да, продолжить", "u:agree:ok", style="success")],
-        [btn("↩️ Отменить создание", "u:menu", style="danger")],
-    )
-
-
-def hash_prompt_kb() -> InlineKeyboardMarkup:
-    return markup([
-        btn("📖 Где взять ссылку?", "u:hash:help"),
-        btn("↩️ Отменить", "u:menu", style="danger"),
-    ])
-
-
-def hash_added_kb(hashes: list, max_h: int = 4) -> InlineKeyboardMarkup:
-    rows = []
-
-    hash_buttons = [
-        btn(f"❌ …{h[-4:]}", f"u:hash:rm:{h}", style="danger")
-        for h in hashes
-    ]
-
-    for i in range(0, len(hash_buttons), 2):
-        rows.append(hash_buttons[i:i + 2])
-
-    if len(hashes) < max_h:
+    for idx, item in enumerate(links[:shown]):
+        name = str(item.get("name") or f"Нода {idx + 1}")
         rows.append([
-            btn("➕ Добавить ещё", "u:hash:add"),
+            copy_btn(f"📋 {name}", str(item.get("link") or ""),
+                     cb=f"u:show:{idx}")
         ])
 
-    rows.append([
-        btn(
-            "✅ Продолжить с одним" if len(hashes) == 1 else "✅ Продолжить",
-            "u:hash:done",
-            style="success",
-        ),
-    ])
+    extra = max(total - shown, 0)
+
+    if sub_url:
+        label = "📦 Подписка"
+        if extra:
+            label += f" · ещё {extra}"
+        rows.append([btn(label, url=sub_url, style="primary")])
+    else:
+        rows.append([btn("📦 Подписка", "u:sub")])
 
     rows.append([
-        btn("📖 Где взять ссылку?", "u:hash:help"),
-        btn("↩️ Отменить", "u:menu", style="danger"),
-    ])
-
-    return markup(*rows)
-
-
-def hash_help_kb() -> InlineKeyboardMarkup:
-    return markup([
-        btn("🔙 К хешам", "u:hash:add"),
-        btn("↩️ Отменить", "u:menu", style="danger"),
-    ])
-
-
-def done_kb(
-    ios_link: str = "",
-    android_link: str = "",
-) -> InlineKeyboardMarkup:
-    rows = []
-
-    if ios_link:
-        rows.append([copy_btn("🍏 Скопировать iOS WDTT", ios_link)])
-
-    if android_link:
-        rows.append([copy_btn("🤖 Скопировать Android WDTT", android_link)])
-
-    rows.append([
-        btn("↗️ Подписка", "u:sub", style="primary"),
+        btn("🔄 Обновить", "u:access"),
         btn("↩️ В меню", "u:menu"),
     ])
-
     return markup(*rows)
 
 
 def show_link_kb() -> InlineKeyboardMarkup:
-    return markup([
-        btn("🔙 Мой конфиг", "u:traffic"),
+    return markup(
+        [btn("🔙 Мой доступ", "u:access")],
+        [btn("↩️ В меню", "u:menu")],
+    )
+
+
+def sub_kb(sub_url: str = "", links: list | None = None,
+           shown: int = 5) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if sub_url:
+        rows.append([btn("🌐 Открыть подписку", url=sub_url, style="primary")])
+
+    for idx, item in enumerate((links or [])[:shown]):
+        name = str(item.get("name") or f"Нода {idx + 1}")
+        rows.append([
+            copy_btn(f"📋 {name}", str(item.get("link") or ""),
+                     cb=f"u:show:{idx}")
+        ])
+
+    rows.append([
+        btn("📱 Мой доступ", "u:access"),
         btn("↩️ В меню", "u:menu"),
     ])
+    return markup(*rows)
 
-
-# ------------------------------------------------------------- конфиг
 
 def config_kb(
     sub_url: str = "",
     ios_link: str = "",
     android_link: str = "",
 ) -> InlineKeyboardMarkup:
-    rows = []
-
-    if sub_url:
-        rows.append([
-            btn("🌐 Подписка", url=sub_url, style="primary"),
-            btn("🗑 Удалить", "u:del1", style="danger"),
-        ])
-    else:
-        rows.append([
-            btn("🗑 Удалить", "u:del1", style="danger"),
-        ])
-
-    if ios_link and android_link:
-        rows.append([
-            copy_btn("🍏 iOS — WDTT", ios_link),
-        ])
-        rows.append([
-            copy_btn("🤖 Android — WDTT", android_link),
-        ])
-
-    rows.append([
-        btn("↩️ В меню", "u:menu"),
-    ])
-
-    return markup(*rows)
+    """Совместимость со старыми вызовами."""
+    links = []
+    if android_link:
+        links.append({"name": "Android", "link": android_link})
+    if ios_link:
+        links.append({"name": "iOS", "link": ios_link})
+    return access_kb(links, sub_url=sub_url, shown=len(links) or 5)
 
 
-def sub_kb(sub_url: str = "") -> InlineKeyboardMarkup:
-    rows = []
+def done_kb(ios_link: str = "", android_link: str = "") -> InlineKeyboardMarkup:
+    links = []
+    if android_link:
+        links.append({"name": "Android", "link": android_link})
+    if ios_link:
+        links.append({"name": "iOS", "link": ios_link})
+    return access_kb(links, shown=len(links) or 5)
 
-    if sub_url:
-        rows.append([
-            btn("🌐 Открыть подписку", url=sub_url, style="primary"),
-        ])
 
-    rows.append([
-        btn("📱 Трафик", "u:traffic"),
-        btn("↩️ В меню", "u:menu"),
-    ])
+# ------------------------------------------------------ регистрация
 
-    return markup(*rows)
+
+def step_app_kb() -> InlineKeyboardMarkup:
+    """Совместимость: выбор приложения больше не нужен."""
+    return markup(
+        [btn("✅ Продолжить", "u:agree", style="success")],
+        [btn("↩️ Отменить", "u:menu", style="danger")],
+    )
+
+
+def agreement_kb(cb: str = "u:agree") -> InlineKeyboardMarkup:
+    return markup(
+        [btn("✅ Принимаю", cb, style="success")],
+        [btn("↩️ Отмена", "u:menu", style="danger")],
+    )
+
+
+def hash_prompt_kb() -> InlineKeyboardMarkup:
+    return markup([btn("↩️ Отмена", "u:menu", style="danger")])
+
+
+def hash_added_kb(hashes: list | None = None, max_h: int = 4) -> InlineKeyboardMarkup:
+    """Совместимость со старым флоу (VK-хеши больше не нужны)."""
+    return markup(
+        [btn("✅ Продолжить", "u:hash:done", style="success")],
+        [btn("↩️ Отмена", "u:menu", style="danger")],
+    )
+
+
+def hash_help_kb() -> InlineKeyboardMarkup:
+    return markup([btn("↩️ Назад", "u:menu")])
 
 
 def referral_kb() -> InlineKeyboardMarkup:
-    return markup([
-        btn("↩️ В меню", "u:menu"),
-    ])
+    return markup([btn("↩️ В меню", "u:menu")])
 
 
-def menu_back_kb(sections: list | None = None) -> InlineKeyboardMarkup:
-    """Кнопка возврата в меню (+ соседние разделы для листания)."""
-    rows = []
-    for i in range(0, len(sections or []), 2):
-        pair = sections[i:i + 2]
-        rows.append([btn(f"📂 {s.get('title') or s['key']}",
-                         f"u:sec:{s['key']}") for s in pair])
+# ------------------------------------------------------ приложения
+
+
+def apps_kb(links: list | None = None) -> InlineKeyboardMarkup:
+    rows = [
+        [btn(str(link.get("label") or "Открыть"), url=link["url"])]
+        for link in (links or [])
+        if link.get("url")
+    ]
     rows.append([btn("↩️ В меню", "u:menu")])
     return markup(*rows)
 
 
-def apps_kb(links: list) -> InlineKeyboardMarkup:
-    rows = [
-        [btn(str(link.get("label", "Открыть")), url=link["url"])]
-        for link in links
-        if link.get("url")
-    ]
-
-    rows.append([
-        btn("↩️ В меню", "u:menu"),
-    ])
-
-    return markup(*rows)
+# ------------------------------------------------------ каналы
 
 
-# ------------------------------------------------------------- каналы
+def subscribe_kb(channels: list | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
 
-def subscribe_kb(channels: list) -> InlineKeyboardMarkup:
-    rows = []
-
-    for ch in channels:
+    for ch in channels or []:
         username = ch.get("username")
         channel_id = ch.get("channel_id")
         url = ch.get("url")
 
         if not url and username:
-            url = f"https://t.me/{username.lstrip('@')}"
-
+            url = f"https://t.me/{str(username).lstrip('@')}"
         if not url and channel_id:
             url = f"https://t.me/c/{str(channel_id).replace('-100', '')}"
-
         if not url:
             continue
 
         title = ch.get("title") or username or str(channel_id)
+        rows.append([btn(f"📺 {title}", url=url)])
 
-        rows.append([
-            btn(f"📺 {title}", url=url),
-        ])
-
-    rows.append([
-        btn("🔄 Я подписался — проверить", "u:menu", style="success"),
-    ])
-
+    rows.append([btn("🔄 Проверить подписку", "chk:r", style="success")])
     return markup(*rows)
 
 
-# ---------------------------------------------------------------- админка
+# ------------------------------------------------------ админка
+
 
 def adm_root_kb() -> InlineKeyboardMarkup:
     return markup(
-        [
-            btn("📊 Статистика", "adm:stat"),
-            btn("👥 Пользователи", "adm:usr"),
-        ],
-        [
-            btn("📤 Рассылка", "adm:bc"),
-            btn("📺 Каналы", "adm:chn"),
-        ],
-        [
-            btn("🎯 Реклама", "adm:ads"),
-            btn("⚙️ Настройки", "adm:set"),
-        ],
-        [
-            btn("🔌 Сервер / подключения", "adm:srv", style="primary"),
-        ],
+        [btn("📊 Статистика", "adm:stat"), btn("👥 Пользователи", "adm:usr")],
+        [btn("🌍 Ноды", "adm:nodes", style="primary"), btn("⚙️ Настройки", "adm:set")],
+        [btn("📤 Рассылка", "adm:bc"), btn("🎯 Реклама", "adm:ads")],
+        [btn("📺 Каналы", "adm:chn"), btn("🎫 Тикеты", "adm:tkt")],
+        [btn("🧩 Разделы", "adm:sec")],
     )
 
 
 def adm_back_kb(target: str = "adm") -> InlineKeyboardMarkup:
-    return markup([
-        btn("⬅️ В админку", target),
-    ])
+    return markup([btn("⬅️ Назад", target)])
 
 
 def srv_kb() -> InlineKeyboardMarkup:
     return markup(
-        [
-            btn("♻️ Рестарт WDTT", "adm:srv:rw", style="warn"),
-            btn("♻️ Рестарт Xray", "adm:srv:rx", style="warn"),
-        ],
-        [
-            btn("🔄 Обновить", "adm:srv"),
-            btn("⬅️ В админку", "adm"),
-        ],
+        [btn("♻️ Перезапустить WDTT", "adm:srv:rw", style="danger")],
+        [btn("🔄 Обновить", "adm:srv"), btn("⬅️ В админку", "adm")],
     )
+
+
+def nodes_kb(nodes: list, page: int = 0, pages: int = 1) -> InlineKeyboardMarkup:
+    from aiogram.types import InlineKeyboardButton as IKB
+
+    from .wdtt import node_online
+
+    rows: list[list[IKB]] = []
+
+    for node in nodes:
+        node_id = str(node.get("id") or node.get("name") or "")
+        name = str(node.get("name") or node.get("host") or node_id or "Нода")
+        online = "🟢" if node_online(node) else "⚪"
+        rows.append([
+            btn(f"{online} {name}"[:64], cb=f"adm:nodes:v:{node_id}"),
+            btn("📡", cb=f"adm:nodes:ping:{node_id}"),
+            btn("🗑", cb=f"adm:nodes:del1:{node_id}", style="danger"),
+        ])
+
+    rows.append([btn("➕ Добавить ноду", "adm:nodes:add", style="success")])
+
+    nav = []
+    if page > 0:
+        nav.append(IKB(text="⬅️", callback_data=f"adm:nodes:p{page - 1}"))
+    if pages > 1:
+        nav.append(IKB(text=f"{page + 1}/{pages}", callback_data="noop"))
+    if page < pages - 1:
+        nav.append(IKB(text="➡️", callback_data=f"adm:nodes:p{page + 1}"))
+    if nav:
+        rows.append(nav)
+
+    rows.append([btn("🔄 Обновить", "adm:nodes"), btn("⬅️ В админку", "adm")])
+    return markup(*rows)
 
 
 def profile_kb() -> InlineKeyboardMarkup:
-    return markup(
-        [
-            btn(
-                "🚀 Реферальная программа",
-                "u:ref",
-                style="success",
-            ),
-        ],
-        [
-            btn("↩️ В меню", "u:menu"),
-        ],
-    )
+    return markup([btn("↩️ В меню", "u:menu")])

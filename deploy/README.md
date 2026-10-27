@@ -37,10 +37,13 @@ systemctl restart nttunnel-bot
 ```
 BOT_TOKEN=<токен от @BotFather>
 ADMINS=<твой Telegram ID>
-PANEL_BASE=https://<IP или домен панели>:2860/
-ADMIN_USERNAME=<логин админа панели>
-ADMIN_PASSWORD=<пароль админа панели>
+PANEL_BASE=https://<IP или домен панели>:2860
+PANEL_API_KEY=<ключ X-API-Key из окна «REST API» панели>
 ```
+
+`ADMIN_USERNAME`/`ADMIN_PASSWORD` — запасной вариант, если API-ключ не задан
+(бот возьмёт JWT через `POST /api/auth/token`). `PANEL_BASE` указывается без
+`/api`.
 
 ## Управление сервисом
 
