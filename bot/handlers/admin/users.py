@@ -253,10 +253,12 @@ async def profile_text(user_id: str):
     sub_url = user.get("subscription_url") or user.get("sub_url") or ""
     tg_id = panel_tg_id(user)
 
+    settings = await ctx.db.get_settings()
+    include_main = settings.get("include_main_node", False)
     try:
-        links = extract_node_links(user, await ctx.wdtt.list_nodes())
+        links = extract_node_links(user, await ctx.wdtt.list_nodes(), include_main=include_main)
     except Exception:
-        links = extract_node_links(user)
+        links = extract_node_links(user, include_main=include_main)
 
     lines = [
         f"👤 <b>{esc(user.get('name') or user_id)}</b>",

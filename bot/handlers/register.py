@@ -107,7 +107,7 @@ async def render_access(
     settings = await app().db.get_settings()
     shown = node_limit(settings)
     nodes = await _nodes()
-    links = access_links(live, nodes)
+    links = access_links(live, nodes, settings.get("include_main_node", False))
     sub_url = live.get("subscription_url") or user.get("subscription_url") or ""
 
     text = access_text(user, live, links, shown)
@@ -150,7 +150,7 @@ async def cb_sub(cb: CallbackQuery, user: dict | None = None):
     settings = await app().db.get_settings()
     shown = node_limit(settings)
     nodes = await _nodes()
-    links = access_links(live, nodes)
+    links = access_links(live, nodes, settings.get("include_main_node", False))
     sub_url = live.get("subscription_url") or user.get("subscription_url") or ""
 
     await cb.message.edit_text(
@@ -176,7 +176,8 @@ async def cb_show_link(cb: CallbackQuery, user: dict | None = None):
     if live is None:
         return await answer_or_alert(cb, "Панель недоступна", True)
 
-    links = access_links(live, await _nodes())
+    settings = await app().db.get_settings()
+    links = access_links(live, await _nodes(), settings.get("include_main_node", False))
 
     if idx < 0 or idx >= len(links):
         return await answer_or_alert(cb, "Ссылка не найдена", True)

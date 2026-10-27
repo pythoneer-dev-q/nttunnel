@@ -12,7 +12,6 @@ from aiogram.types import CallbackQuery, Message
 from ..context import app
 from ..db import utcnow
 from ..keyboards import apps_kb, menu_back_kb, menu_kb, referral_kb, markup, btn
-from ..services import refresh_snapshot, snapshot_is_fresh
 from ..texts import esc, help_text, menu_text
 from ..utils import answer_or_alert, safe_edit
 
@@ -24,12 +23,6 @@ async def show_menu(target: Message, user_doc: dict, edit: bool = False):
     ctx = app()
 
     user_doc = dict(user_doc or {})
-    live = None
-
-    if user_doc.get("registered") and not snapshot_is_fresh(user_doc):
-        live, _reason = await refresh_snapshot(
-            user_doc, force=True, timeout=5
-        )
 
     try:
         ads = await ctx.gate.get_ads()
@@ -38,7 +31,7 @@ async def show_menu(target: Message, user_doc: dict, edit: bool = False):
         log.warning("menu data failed: %s", e)
         ads, sections = [], []
 
-    text = menu_text(user_doc, live)
+    text = menu_text(user_doc)
     kb = menu_kb(bool(user_doc.get("registered")), ads, sections)
 
     if edit:
@@ -94,7 +87,7 @@ async def cb_intro_second(cb: CallbackQuery):
             "🔑 <b>Как начать</b>\n\n"
             "1. Нажми «Создать доступ» и ознакомься с условиями.\n"
             "2. Установи приложение из раздела «Инструкция».\n"
-            "3. Скопируй ссылку из раздела «Мой доступ» и добавь её в приложение.\n\n"
+            "3. Скопируй ссылку подписки из раздела «Мой доступ» и добавь её в приложение.\n\n"
             "В меню можно проверить трафик, устройства и обратиться в поддержку.",
             markup([btn("Открыть меню", "u:intro:done")]))
     await answer_or_alert(cb)

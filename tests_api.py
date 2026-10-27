@@ -249,7 +249,7 @@ async def main():
     assert real_detail["traffic_used_bytes"] == 356186820, real_detail
 
     real_links = extract_node_links(real_detail, [])
-    assert [x["link"] for x in real_links] == ["wdtt://real-nl", "wdtt://real-master"]
+    assert [x["link"] for x in real_links] == ["wdtt://real-nl"]
 
     # ключ уходит в X-API-Key, JWT при этом не запрашивается
     headers = state["seen_headers"][-1]
@@ -302,7 +302,8 @@ async def main():
     links = extract_node_links(user, nodes_list)
     values = [x["link"] for x in links]
     assert "wdtt://nl" in values and "wdtt://de" in values
-    assert "wdtt://master" in values
+    assert "wdtt://master" not in values
+    assert "wdtt://master" in [x["link"] for x in extract_node_links(user, nodes_list, include_main=True)]
 
     await client.close()
 

@@ -7,7 +7,7 @@ import logging
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
-from ..keyboards import back_menu_kb
+from ..keyboards import markup, btn
 from ..texts import profile_text
 from ..utils import answer_or_alert, safe_edit
 
@@ -20,7 +20,10 @@ async def cb_cabinet(cb: CallbackQuery, user: dict | None = None):
     if not cb.message:
         return await answer_or_alert(cb)
 
-    await safe_edit(cb.message, profile_text(dict(user or {})), back_menu_kb())
+    await safe_edit(cb.message, profile_text(dict(user or {})), markup(
+        [btn("🚀 Реферальная программа", "u:ref")],
+        [btn("↩️ В меню", "u:menu")],
+    ))
     await answer_or_alert(cb)
 
 

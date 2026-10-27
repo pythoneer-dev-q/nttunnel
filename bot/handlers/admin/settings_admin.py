@@ -74,6 +74,8 @@ async def cb_settings(cb: CallbackQuery):
         f"Сброс трафика: <b>{s.get('reset_period_days') or '—'} дн.</b>\n"
         f"Рефералка: <b>+{s.get('referral_bonus_gb') or 0} ГБ</b>\n"
         f"Нод кнопками: <b>{s.get('nodes_copy_limit') or 5}</b>\n"
+        f"Основная нода в прямых ссылках бота: <b>{'включена' if s.get('include_main_node') else 'выключена'}</b>\n"
+        "Состав подписки задаётся в панели.\n"
         f"Соглашение: <b>{len(s.get('agreement_text') or '')}</b> симв.\n"
         f"Приложения:\n{links_preview}"
     )
@@ -91,6 +93,7 @@ async def cb_settings(cb: CallbackQuery):
     kb.button(text="♻️ Сброс трафика", callback_data="adm:set:i:reset")
     kb.button(text="🚀 Реферальный бонус", callback_data="adm:set:i:bonus")
     kb.button(text="🌍 Нод кнопками", callback_data="adm:set:i:nodes")
+    kb.button(text="🖥 Основная нода: " + ("вкл." if s.get("include_main_node") else "выкл."), callback_data="adm:set:mainnode")
     kb.button(text="📖 Соглашение", callback_data="adm:set:agr")
     kb.button(text="📥 Приложения", callback_data="adm:set:apps")
     kb.button(text="⬅️ В админку", callback_data="adm")
@@ -98,6 +101,16 @@ async def cb_settings(cb: CallbackQuery):
 
     await safe_edit(cb.message, text, kb.as_markup())
     await answer_or_alert(cb)
+
+
+@router.callback_query(F.data == "adm:set:mainnode")
+async def cb_toggle_main_node(cb: CallbackQuery):
+    ctx = app()
+    settings = await ctx.db.get_settings()
+    enabled = not settings.get("include_main_node", False)
+    await ctx.db.save_settings({"include_main_node": enabled})
+    await ctx.db.log_event(cb.from_user.id, "admin", f"include_main_node={enabled}")
+    await cb_settings(cb)
 
 
 @router.callback_query(F.data == "adm:set:tgl")

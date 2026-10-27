@@ -116,27 +116,16 @@ def _name(user: dict) -> str:
 
 
 def menu_text(user: dict, live: dict | None = None) -> str:
-    data = live if live is not None else _snapshot(user)
-    registered = bool(user.get("registered"))
-
-    lines = [f"👋 <b>{_name(user)}</b>", ""]
-
-    if registered and (
-        "total_gb" in data or "traffic_used_bytes" in data
-    ):
-        lines.append(traffic_line(data))
-        lines.append(status_line({"status": data.get("status", "active"),
-                                  "expires_at": data.get("expires_at"),
-                                  "devices_bound": data.get("devices_bound"),
-                                  "max_devices": data.get("max_devices"),
-                                  "online": data.get("online")}))
-    elif registered:
-        lines.append("📊 <b>Нет данных о трафике</b>")
-        lines.append("Открой «Мой доступ» для обновления.")
-    else:
-        lines += ["🔑 Доступ ещё не создан", "", "Создай доступ, чтобы получить ссылку для подключения. Затем установи приложение из раздела «Инструкция» и добавь в него ссылку."]
-
-    return "\n".join(lines)
+    return (f"👋 <b>Привет, {_name(user)}!</b>\n\n"
+            "Это сервис подключения через WDTT. Здесь можно получить доступ, "
+            "настроить приложение и управлять подключёнными устройствами.\n\n"
+            "Открой «Мой доступ», чтобы найти подписку и проверить её состояние. "
+            "В профиле находится реферальная программа, а в инструкции — шаги подключения."
+            if user.get("registered") else
+            f"👋 <b>Привет, {_name(user)}!</b>\n\n"
+            "Это сервис подключения через WDTT. Создай доступ, затем установи "
+            "приложение и добавь в него ссылку подписки. Инструкция поможет начать, "
+            "а поддержка ответит на вопросы.")
 
 
 def no_config_text() -> str:
@@ -187,15 +176,13 @@ def access_text(
         status_line(live),
     ]
 
-    if total_nodes:
-        hidden = max(total_nodes - shown, 0)
-        tail = f" · {shown} кнопками" if hidden else ""
-        if hidden:
-            tail += f", {hidden} в подписке"
-        lines += ["", f"🌍 Ноды: <b>{total_nodes}</b>{tail}"]
-
-    lines += ["", "Скопируй ссылку нужной ноды и добавь её в приложение. "
-              "Для списка серверов используй подписку. В разделе «Устройства» можно проверить привязки."]
+    sub_url = live.get("subscription_url") or user.get("subscription_url") or ""
+    if sub_url:
+        lines += ["", "📦 <b>Ссылка подписки</b>", f"<code>{esc(sub_url)}</code>"]
+    else:
+        lines += ["", "📦 Панель пока не предоставила ссылку подписки."]
+    lines += ["", "Добавь ссылку подписки в приложение и обновляй её при изменении серверов. "
+              "В разделе «Устройства» можно проверить привязки."]
 
     return "\n".join(lines)
 
@@ -304,8 +291,8 @@ def help_text() -> str:
     return (
         "🏳️ <b>Подключение</b>\n\n"
         "1. Установи приложение для своей платформы.\n"
-        "2. Открой «Мой доступ» и скопируй ссылку ноды.\n"
-        "3. Вставь ссылку в приложение и подключись.\n\n"
+        "2. Открой «Мой доступ» и скопируй ссылку подписки.\n"
+        "3. Добавь подписку в приложение и подключись.\n\n"
         "Если приложение поддерживает подписки, добавь ссылку из раздела «Подписка»: "
         "так будет проще обновлять список серверов.\n\n"
         "Если подключиться не получается, проверь доступный трафик и срок действия, "

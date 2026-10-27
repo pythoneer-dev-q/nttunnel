@@ -123,8 +123,9 @@ async def refresh_snapshot(user: dict, force: bool = False,
     return live, reason
 
 
-def access_links(live: dict, nodes: list | None = None) -> list[dict]:
-    return extract_node_links(live, nodes)
+def access_links(live: dict, nodes: list | None = None,
+                 include_main: bool = False) -> list[dict]:
+    return extract_node_links(live, nodes, include_main=include_main)
 
 
 def node_limit(settings: dict | None = None) -> int:

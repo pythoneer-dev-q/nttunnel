@@ -41,6 +41,7 @@ DEFAULT_SETTINGS: dict = {
     "reset_period_days": 0,          # авто-сброс трафика, 0 = выкл.
     "referral_bonus_gb": 5,
     "nodes_copy_limit": 5,           # нод кнопками, остальные — в подписке
+    "include_main_node": False,
     "agreement_text": "",            # seed из texts.DEFAULT_AGREEMENT
     "app_links": [],                 # [{label, url}]
     "support_chat_id": "",

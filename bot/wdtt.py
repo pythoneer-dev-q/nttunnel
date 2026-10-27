@@ -169,7 +169,8 @@ def _node_name(obj: dict, fallback: str = "") -> str:
     )
 
 
-def extract_node_links(detail: dict, nodes: list | None = None) -> list[dict]:
+def extract_node_links(detail: dict, nodes: list | None = None,
+                       include_main: bool = False) -> list[dict]:
     """Возвращает список ``[{"name": ..., "link": ...}]`` для всех нод.
 
     Панель может отдавать конфигурации в разных полях и форматах, поэтому
@@ -178,10 +179,14 @@ def extract_node_links(detail: dict, nodes: list | None = None) -> list[dict]:
     detail = detail or {}
     result: list[dict] = []
     seen: set[str] = set()
+    master = str(_first(detail, "link", "wdtt_link", "url") or "").strip()
+
+    def is_main(item: dict) -> bool:
+        return any(online_flag(item.get(k)) for k in ("is_main", "is_master", "is_primary")) or str(item.get("role") or "").lower() in ("main", "master", "primary")
 
     def add(name: str, link: str) -> None:
         link = (link or "").strip()
-        if not link or link in seen:
+        if not link or link in seen or (not include_main and master and link == master):
             return
         seen.add(link)
         result.append({"name": (name or "Нода")[:40], "link": link})
@@ -215,11 +220,16 @@ def extract_node_links(detail: dict, nodes: list | None = None) -> list[dict]:
                 name = str(idx)
                 node = nodes_by_id.get(name) or nodes_by_host.get(name)
                 if node:
+                    if not include_main and is_main(node):
+                        continue
                     name = _node_name(node, name)
                 add(name, item)
                 continue
 
             if not isinstance(item, dict):
+                continue
+
+            if not include_main and (is_main(item) or (isinstance(item.get("node"), dict) and is_main(item["node"]))):
                 continue
 
             link = _link_from(item)
@@ -233,18 +243,21 @@ def extract_node_links(detail: dict, nodes: list | None = None) -> list[dict]:
                 or nodes_by_host.get(str(item.get("host") or ""))
             )
             if node:
+                if not include_main and is_main(node):
+                    continue
                 name = _node_name(node, name)
             add(name, link)
 
     # Отдельная ссылка пользователя (мастер-нода).
-    master = _first(detail, "link", "wdtt_link", "url")
-    if master:
+    if master and include_main:
         add("Основная нода", str(master))
 
     # Если панель отдала список нод, но без ссылок — хотя бы подпишем их.
     if not result and nodes:
         for node in nodes:
             if not isinstance(node, dict):
+                continue
+            if not include_main and is_main(node):
                 continue
             link = _link_from(node)
             if link:

@@ -60,21 +60,14 @@ def menu_kb(
     rows: list[list[InlineKeyboardButton]] = []
 
     if registered:
-        rows.append([
-            btn("📱 Мой доступ", "u:access", style="primary"),
-            btn("📦 Подписка", "u:sub"),
-        ])
-        rows.append([
-            btn("🏳️ Инструкция", "u:apps"),
-            btn("🚀 Рефералка", "u:ref", style="success"),
-        ])
+        rows.append([btn("📱 Мой доступ", "u:access", style="primary")])
         rows.append([
             btn("🆘 Поддержка", "u:support"),
             btn("👤 Профиль", "u:cab"),
         ])
     else:
         rows.append([btn("🔑 Создать доступ", "u:reg", style="success")])
-        rows.append([btn("🏳️ Инструкция", "u:apps")])
+        rows.append([btn("🆘 Поддержка", "u:support"), btn("👤 Профиль", "u:cab")])
 
     for i in range(0, len(sections or []), 2):
         pair = sections[i:i + 2]
@@ -87,6 +80,7 @@ def menu_kb(
         if ad.get("url"):
             rows.append([btn(str(ad.get("title") or "Реклама"), url=ad["url"])])
 
+    rows.append([btn("🏳️ Инструкция", "u:apps")])
     return markup(*rows)
 
 
@@ -151,26 +145,10 @@ def access_kb(
     ``links`` — список ``{"name", "link"}``. Первые ``shown`` ссылок
     копируются кнопками, остальные доступны в подписке.
     """
-    links = links or []
-    total = total_nodes if total_nodes is not None else len(links)
     rows: list[list[InlineKeyboardButton]] = []
 
-    for idx, item in enumerate(links[:shown]):
-        name = str(item.get("name") or f"Нода {idx + 1}")
-        rows.append([
-            copy_btn(f"📋 {name}", str(item.get("link") or ""),
-                     cb=f"u:show:{idx}")
-        ])
-
-    extra = max(total - shown, 0)
-
     if sub_url:
-        label = "📦 Подписка"
-        if extra:
-            label += f" · ещё {extra}"
-        rows.append([btn(label, url=sub_url, style="primary")])
-    else:
-        rows.append([btn("📦 Подписка", "u:sub")])
+        rows.append([copy_btn("📋 Скопировать подписку", sub_url, cb="u:sub")])
 
     rows.append([
         btn("🔄 Обновить", "u:access"),
@@ -193,13 +171,6 @@ def sub_kb(sub_url: str = "", links: list | None = None,
 
     if sub_url:
         rows.append([btn("🌐 Открыть подписку", url=sub_url, style="primary")])
-
-    for idx, item in enumerate((links or [])[:shown]):
-        name = str(item.get("name") or f"Нода {idx + 1}")
-        rows.append([
-            copy_btn(f"📋 {name}", str(item.get("link") or ""),
-                     cb=f"u:show:{idx}")
-        ])
 
     rows.append([
         btn("📱 Мой доступ", "u:access"),
@@ -266,7 +237,7 @@ def hash_help_kb() -> InlineKeyboardMarkup:
 
 
 def referral_kb() -> InlineKeyboardMarkup:
-    return markup([btn("↩️ В меню", "u:menu")])
+    return markup([btn("↩️ В профиль", "u:cab")], [btn("↩️ В меню", "u:menu")])
 
 
 # ------------------------------------------------------ приложения

@@ -53,7 +53,10 @@ def test_helpers():
 
     assert any(x["link"] == "wdtt://nl" for x in links)
     assert any(x["link"] == "wdtt://de" for x in links)
-    assert any(x["link"] == "wdtt://master" for x in links)
+    assert not any(x["link"] == "wdtt://master" for x in links)
+    assert any(x["link"] == "wdtt://master" for x in extract_node_links(detail, nodes, include_main=True))
+    duplicate = {"link": "wdtt://master", "nodes": [{"link": "wdtt://master"}, {"is_main": True, "link": "wdtt://other"}]}
+    assert not extract_node_links(duplicate)
 
     # строковые булевы значения панели
     assert online_flag(True) and online_flag("true") and online_flag("online")
@@ -114,21 +117,23 @@ def test_keyboards():
     ]
     assert "u:sec:faq" in data
 
-    # первые 5 нод — кнопки копирования, остальные — в подписке
+    # Единственная кнопка копирования ведёт на подписку.
     copied = [
         b
         for row in access_kb(links, "https://sub", 5, 7).inline_keyboard
         for b in row
         if b.copy_text
     ]
-    assert len(copied) == 5
+    assert len(copied) == 1 and copied[0].copy_text.text == "https://sub"
 
     labels = [
         b.text
         for row in access_kb(links, "https://sub", 5, 7).inline_keyboard
         for b in row
     ]
-    assert any("ещё 2" in (t or "") for t in labels)
+    assert not any("Node" in (t or "") for t in labels)
+    assert menu_kb(True, ads, sections).inline_keyboard[-1][0].callback_data == "u:apps"
+    assert "u:ref" not in data and "u:sub" not in data
 
     # callback_data в пределах лимита Telegram
     for kb in keyboards:
@@ -179,9 +184,8 @@ def test_texts():
     access = access_text(user, live, links, 5)
     sub = sub_text(user, live, links)
 
-    assert "10.0 ГБ" in menu and "175 ГБ" in menu
-    assert "10.0 ГБ" in access and "Ноды" in access
-    assert "5 кнопками" in access and "1 в подписке" in access
+    assert "10.0 ГБ" not in menu and "175 ГБ" not in menu
+    assert "10.0 ГБ" in access and "https://sub.example" in access
     assert "10.0 ГБ" in sub and "https://sub.example" in sub
     print("texts OK")
 
