@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ...context import app
+from ...keyboards import adm_back_kb
 from ...texts import esc
 from ...utils import answer_or_alert, extract_url, safe_edit
 
@@ -190,7 +191,7 @@ async def cb_set_agreement(cb: CallbackQuery, state: FSMContext):
             "📖 <b>Соглашение</b>\n\n"
             f"{esc((s.get('agreement_text') or '')[:2000])}\n\n"
             "Пришли новый текст (HTML разрешён, до 3500 символов).",
-            None,
+            adm_back_kb("adm:set"),
         )
     await answer_or_alert(cb, "Жду текст")
 
@@ -221,7 +222,7 @@ async def cb_set_apps(cb: CallbackQuery, state: FSMContext):
             "Каждая строка:\n"
             "<code>Метка | https://ссылка</code>\n\n"
             "Новый список заменит текущий.",
-            None,
+            adm_back_kb("adm:set"),
         )
     await answer_or_alert(cb, "Жду список")
 

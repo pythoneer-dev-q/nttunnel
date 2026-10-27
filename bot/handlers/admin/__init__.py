@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Админ-роутер (/godmode): агрегирует под-модули."""
-from aiogram import Router
+from aiogram import BaseMiddleware, Router
 from aiogram.filters import BaseFilter
 from aiogram.types import TelegramObject
 
@@ -17,6 +17,20 @@ class IsAdmin(BaseFilter):
 router = Router(name="admin")
 router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
+
+
+class ClearAdminStateOnBack(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        action = event.data or ""
+        navigation = {"adm", "adm:stat", "adm:srv", "adm:nodes", "adm:usr", "adm:tkt", "adm:bc", "adm:chn", "adm:ads", "adm:sec", "adm:set"}
+        if action in navigation or action.startswith(("adm:usr:v:", "adm:usr:p", "adm:tkt:v", "adm:tkt:p", "adm:nodes:p")):
+            state = data.get("state")
+            if state and str(await state.get_state() or "").startswith("Adm"):
+                await state.clear()
+        return await handler(event, data)
+
+
+router.callback_query.outer_middleware(ClearAdminStateOnBack())
 
 from . import (ads, broadcast, channels, dashboard, sections, settings_admin,
                  tickets, users)  # noqa: E402

@@ -136,11 +136,8 @@ class UserGate(BaseMiddleware):
                 await answer_or_alert(cb, "🚫 Доступ заблокирован", True)
             return
 
-        if is_admin:
-            return await handler(event, data)
-
         if cb and cb.data == "chk:r":
-            channels = await self.get_channels()
+            channels = [] if is_admin else await self.get_channels()
             missing = []
             for channel in channels:
                 if not await self.check_membership(
@@ -163,6 +160,9 @@ class UserGate(BaseMiddleware):
                     )
                 await answer_or_alert(cb, "Подпишись на каналы 📺")
             return
+
+        if is_admin:
+            return await handler(event, data)
 
         if cb and cb.data in ALLOWED_CB:
             await answer_or_alert(cb)

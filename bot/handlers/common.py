@@ -199,3 +199,9 @@ async def cb_referral(cb: CallbackQuery, user: dict | None = None):
 @router.callback_query(F.data == "noop")
 async def cb_noop(cb: CallbackQuery):
     await answer_or_alert(cb)
+
+
+@router.callback_query(F.data == "chk:r")
+async def cb_check_subscriptions(cb: CallbackQuery):
+    # UserGate выполняет проверку и переход в меню до вызова обработчика.
+    await answer_or_alert(cb)

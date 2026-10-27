@@ -47,6 +47,7 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     dp["config"] = cfg
     dp["admin_ids"] = cfg.admin_ids
+
     dp.message.middleware(gate)
     dp.callback_query.middleware(gate)
 
@@ -145,6 +146,26 @@ async def main():
     await feed_cb("u:menu", 7003)
     assert "editMessageText" in await sent_methods(), "меню не открылось"
 
+    # Кнопка проверки возвращает в меню и пользователя, и администратора.
+    await feed_cb("chk:r", 7004)
+    assert "editMessageText" in await sent_methods(), "проверка подписки не открыла меню"
+    dp["admin_ids"] = [TG2]
+    await feed_cb("chk:r", 7005)
+    assert "editMessageText" in await sent_methods(), "проверка подписки админа не открыла меню"
+    dp["admin_ids"] = cfg.admin_ids
+
+    # «Назад» из админского ввода очищает состояние и открывает раздел.
+    original_admins = cfg.admin_ids
+    cfg.admin_ids = [TG2]
+    dp["admin_ids"] = [TG2]
+    fsm = dp.fsm.get_context(bot=bot, chat_id=TG2, user_id=TG2)
+    await feed_cb("adm:set:agr", 7006)
+    assert await fsm.get_state() == "AdmSetStates:wait_agreement"
+    await feed_cb("adm:set", 7007)
+    assert await fsm.get_state() is None
+    cfg.admin_ids = original_admins
+    dp["admin_ids"] = original_admins
+
     # ------------------------------------------------ панель недоступна / нет юзера
     import bot.services as services
 
@@ -178,12 +199,19 @@ async def main():
     text = last_edit_text()
     assert "не найден" in text.lower(), text
 
+    # Пересоздание очищает локальную запись без повторного обращения к панели.
+    import bot.handlers.register as registration
+    original_registration_fetch = registration.fetch_live
+    registration.fetch_live = AsyncMock(side_effect=asyncio.TimeoutError())
+    await feed_cb("u:recreate", 7108)
+    assert "Соглашение" in last_edit_text(), last_edit_text()
+    registration.fetch_live.assert_not_awaited()
+    registration.fetch_live = original_registration_fetch
+    doc = await db.get_user(TG2)
+    assert not doc.get("registered") and not doc.get("panel_id"), doc
+
     # ------------------------- создание доступа при недоступной панели (fallback)
     services.fetch_live = fake_down
-    await db.users.update_one(
-        {"tg_id": TG2},
-        {"$set": {"registered": False}, "$unset": {"panel_id": ""}},
-    )
     ctx.wdtt.create_user = AsyncMock(return_value={
         "id": "tg_901999",
         "password": "SECRET123",
@@ -203,6 +231,13 @@ async def main():
 
     await feed_hash("https://evil.example/call/join/hash1", 7104)
     await feed_hash("hash1, https://vk.ru/call/join/hash2, hash1", 7105)
+    import hashlib
+    key = hashlib.sha256(b"hash2").hexdigest()[:16]
+    await feed_cb(f"u:hash:view:{key}", 7120)
+    assert "<code>hash2</code>" in last_edit_text()
+    await feed_cb(f"u:hash:rm:{key}", 7121)
+    assert "1/4" in last_edit_text()
+    await feed_hash("hash2", 7122)
     await feed_hash("hash3,hash4,hash5", 7106)
     await feed_cb("u:hash:done", 7107)
     ctx.wdtt.create_user.assert_awaited_once()

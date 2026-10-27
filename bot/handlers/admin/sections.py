@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ...context import app
+from ...keyboards import adm_back_kb
 from ...texts import esc
 from ...utils import answer_or_alert, safe_edit
 
@@ -85,7 +86,7 @@ async def cb_section_add(cb: CallbackQuery, state: FSMContext):
         "➕ <b>Новый раздел</b>\n\n"
         "Шаг 1/3 — ключ (латиница, цифры, _, -).\n"
         "Например: <code>faq</code>",
-        None,
+        adm_back_kb("adm:sec"),
     )
     await answer_or_alert(cb, "Жду ключ")
 
@@ -102,7 +103,7 @@ async def h_section_key(message: Message, state: FSMContext):
 
     await state.update_data(key=key)
     await state.set_state(AdmSectionStates.wait_title)
-    await message.answer("Шаг 2/3 — заголовок для кнопки:")
+    await message.answer("Шаг 2/3 — заголовок для кнопки:", reply_markup=adm_back_kb("adm:sec"))
 
 
 @router.message(StateFilter(AdmSectionStates.wait_title), F.text)
@@ -115,7 +116,8 @@ async def h_section_title(message: Message, state: FSMContext):
     await state.set_state(AdmSectionStates.wait_text)
     await message.answer(
         f"Заголовок: <b>{esc(title)}</b>\n\n"
-        "Шаг 3/3 — текст раздела (HTML разрешён):"
+        "Шаг 3/3 — текст раздела (HTML разрешён):",
+        reply_markup=adm_back_kb("adm:sec"),
     )
 
 

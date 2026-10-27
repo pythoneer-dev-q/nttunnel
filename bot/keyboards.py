@@ -129,7 +129,7 @@ def panel_down_kb() -> InlineKeyboardMarkup:
 
 def config_missing_kb() -> InlineKeyboardMarkup:
     return markup(
-        [btn("♻️ Пересоздать доступ", "u:reg", style="success")],
+        [btn("♻️ Пересоздать доступ", "u:recreate", style="success")],
         [btn("🔄 Повторить", "u:access"), btn("↩️ В меню", "u:menu")],
     )
 

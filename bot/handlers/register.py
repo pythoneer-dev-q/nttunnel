@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+import hashlib
 from datetime import timedelta
 
 from aiogram import F, Router
@@ -57,7 +58,13 @@ class RegStates(StatesGroup):
 
 
 def _hash_kb(hashes: list[str]):
-    rows = [[btn("✅ Создать доступ", "u:hash:done", style="success")]] if hashes else []
+    rows = []
+    for value in hashes:
+        key = hashlib.sha256(value.encode()).hexdigest()[:16]
+        preview = value if len(value) <= 20 else value[:17] + "…"
+        rows.append([btn(f"🔎 {preview}", f"u:hash:view:{key}"), btn("🗑", f"u:hash:rm:{key}")])
+    if hashes:
+        rows.append([btn("✅ Создать доступ", "u:hash:done", style="success")])
     if hashes:
         rows.append([btn("🗑 Очистить список", "u:hash:clear")])
     rows.append([btn("↩️ Отмена", "u:menu")])
@@ -220,6 +227,32 @@ async def cb_show_link(cb: CallbackQuery, user: dict | None = None):
     await answer_or_alert(cb)
 
 
+async def _clear_local_access(tg_id: int, user: dict) -> bool:
+    result = await app().db.users.update_one(
+        {"tg_id": tg_id, "registered": True,
+         "panel_id": user.get("panel_id"), "creating": {"$ne": True}},
+        {"$set": {"registered": False, "creating": False},
+         "$unset": {key: "" for key in (
+             "panel_id", "panel_password", "panel_link", "panel_snapshot_at",
+             "panel_total_gb", "panel_traffic_used_bytes", "panel_expires_at",
+             "panel_max_devices", "panel_devices_bound", "panel_online",
+             "panel_active", "panel_status", "subscription_url", "sub_id",
+             "sub_total_gb", "sub_max_devices", "sub_created_at", "sub_vk_hashes",
+         )}},
+    )
+    return bool(result.modified_count)
+
+
+@router.callback_query(F.data == "u:recreate")
+async def cb_recreate(cb: CallbackQuery, user: dict | None = None):
+    if not cb.message:
+        return await answer_or_alert(cb)
+    user = dict(user or {})
+    if user.get("registered") and not await _clear_local_access(cb.from_user.id, user):
+        return await answer_or_alert(cb, "Данные доступа изменились. Открой меню и попробуй снова.", True)
+    await cb_reg_start(cb, {**user, "registered": False})
+
+
 @router.callback_query(F.data == "u:reg")
 async def cb_reg_start(cb: CallbackQuery, user: dict | None = None):
     if not cb.message:
@@ -228,6 +261,9 @@ async def cb_reg_start(cb: CallbackQuery, user: dict | None = None):
     user = dict(user or {})
 
     if user.get("registered"):
+        # Сообщения с прежней клавиатурой отправляли этот экран в u:reg.
+        if "Доступ не найден в панели" in (cb.message.text or ""):
+            return await cb_recreate(cb, user)
         live, reason = await fetch_live(user, force=True, timeout=8)
 
         if reason == "ok":
@@ -239,13 +275,17 @@ async def cb_reg_start(cb: CallbackQuery, user: dict | None = None):
                 cb, "Панель недоступна, попробуй позже", True
             )
 
-        # missing / no_link — разрешаем пересоздать.
+        # Карточка точно отсутствует: освобождаем локальную запись и место.
+        # При таймауте панели сюда не попадаем — отсутствие не подтверждено.
+        if not await _clear_local_access(cb.from_user.id, user):
+            return await answer_or_alert(cb, "Данные доступа изменились. Открой меню и попробуй снова.", True)
+
         settings, ok = await _slots_ok()
         if not ok:
             return await answer_or_alert(cb, "Свободных мест нет", True)
 
         await cb.message.edit_text(
-            agree_text(settings), reply_markup=agreement_kb("u:agree:r")
+            agree_text(settings), reply_markup=agreement_kb("u:agree")
         )
         return await answer_or_alert(cb)
 
@@ -305,6 +345,31 @@ async def clear_hashes(cb: CallbackQuery, state: FSMContext):
     if cb.message:
         await cb.message.edit_text(_hash_text([]), reply_markup=_hash_kb([]))
     await answer_or_alert(cb)
+
+
+@router.callback_query(StateFilter(RegStates.hashes), F.data.startswith("u:hash:view:"))
+async def view_hash(cb: CallbackQuery, state: FSMContext):
+    hashes = (await state.get_data()).get("hashes") or []
+    key = cb.data.rsplit(":", 1)[-1]
+    value = next((h for h in hashes if hashlib.sha256(h.encode()).hexdigest()[:16] == key), None)
+    if value is None:
+        return await answer_or_alert(cb, "Хеш больше не найден", True)
+    if cb.message:
+        await cb.message.edit_text(_hash_text(hashes) + f"\n\n<b>Выбранный хеш:</b>\n<code>{esc(value)}</code>", reply_markup=_hash_kb(hashes))
+    await answer_or_alert(cb)
+
+
+@router.callback_query(StateFilter(RegStates.hashes), F.data.startswith("u:hash:rm:"))
+async def remove_hash(cb: CallbackQuery, state: FSMContext):
+    hashes = (await state.get_data()).get("hashes") or []
+    key = cb.data.rsplit(":", 1)[-1]
+    remaining = [h for h in hashes if hashlib.sha256(h.encode()).hexdigest()[:16] != key]
+    if len(remaining) == len(hashes):
+        return await answer_or_alert(cb, "Хеш больше не найден", True)
+    await state.update_data(hashes=remaining)
+    if cb.message:
+        await cb.message.edit_text(_hash_text(remaining), reply_markup=_hash_kb(remaining))
+    await answer_or_alert(cb, "Хеш удалён")
 
 
 @router.callback_query(StateFilter(RegStates.hashes), F.data == "u:hash:done")
