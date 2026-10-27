@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import timedelta
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
@@ -18,6 +19,7 @@ from ..keyboards import (
     panel_down_kb,
     show_link_kb,
     sub_kb,
+    markup, btn,
 )
 from ..services import (
     access_links,
@@ -36,6 +38,7 @@ from ..texts import (
     node_link_text,
     panel_down_text,
     sub_text,
+    esc,
 )
 from ..utils import answer_or_alert, yes_no_kb
 from ..wdtt import WdttError, online_flag
@@ -346,6 +349,35 @@ async def cb_agree(cb: CallbackQuery, user: dict | None = None):
         await answer_or_alert(cb, "Ошибка создания", True)
 
 
+@router.callback_query(F.data == "u:devices")
+async def cb_devices(cb: CallbackQuery, user: dict | None = None):
+    if not cb.message:
+        return await answer_or_alert(cb)
+    live, reason = await refresh_snapshot(dict(user or {}), force=True, timeout=12)
+    if live is None:
+        return await answer_or_alert(cb, "Не удалось получить данные панели", True)
+    devices = live.get("devices") or live.get("bound_devices")
+    lines = ["📱 <b>Устройства</b>", "",
+             f"Привязано: <b>{as_int(live.get('devices_bound'))}</b> из <b>{as_int(live.get('max_devices')) or '∞'}</b>."]
+    if isinstance(devices, list) and devices:
+        lines.append("")
+        for item in devices[:30]:
+            if isinstance(item, dict):
+                label = item.get("name") or item.get("device_name") or item.get("id") or item.get("device_id") or "Устройство"
+            else:
+                label = item
+            lines.append(f"• {esc(str(label)[:100])}")
+    else:
+        lines += ["", "Панель не предоставила список устройств."]
+    lines += ["", "Чтобы сбросить привязки, можно удалить доступ и создать его заново. "
+              "Старые ссылки перестанут работать; новую ссылку потребуется добавить на устройствах. "
+              "Удаление доступно не чаще одного раза в 24 часа."]
+    await cb.message.edit_text("\n".join(lines), reply_markup=markup(
+        [btn("♻️ Сбросить через удаление доступа", "u:del1")],
+        [btn("↩️ Мой доступ", "u:access")]))
+    await answer_or_alert(cb)
+
+
 @router.callback_query(F.data == "u:del1")
 async def cb_del_confirm(cb: CallbackQuery):
     if not cb.message:
@@ -353,7 +385,9 @@ async def cb_del_confirm(cb: CallbackQuery):
 
     await cb.message.edit_text(
         "🗑 <b>Удалить доступ?</b>\n\n"
-        "Пользователь и его ключи будут удалены из панели.",
+        "Пользователь, ключи и привязки будут удалены из панели. "
+        "Старые ссылки перестанут работать. Затем создай доступ заново.\n\n"
+        "Удалять доступ можно не чаще одного раза в 24 часа.",
         reply_markup=yes_no_kb(
             "", "u:del2", "u:access", "🗑 Удалить", "❌ Отмена"
         ),
@@ -370,14 +404,30 @@ async def cb_del_do(cb: CallbackQuery, user: dict | None = None):
     user = dict(user or {})
     panel_id = str(user.get("panel_id") or "")
 
+    if not user.get("registered") or not panel_id:
+        return await answer_or_alert(cb, "Доступ не найден", True)
+
+    now = utcnow()
+    now = now.replace(microsecond=(now.microsecond // 1000) * 1000)
+    claimed = await ctx.db.users.find_one_and_update(
+        {"tg_id": cb.from_user.id, "registered": True, "panel_id": panel_id,
+         "$or": [{"last_access_delete": {"$exists": False}},
+                 {"last_access_delete": {"$lte": now - timedelta(days=1)}}]},
+        {"$set": {"last_access_delete": now}},
+    )
+    if not claimed:
+        return await answer_or_alert(cb, "Удаление доступно раз в 24 часа", True)
+
     try:
         if panel_id:
             await ctx.wdtt.delete_user(panel_id)
     except WdttError as e:
         if e.status != 404:
+            await ctx.db.users.update_one({"tg_id": cb.from_user.id, "last_access_delete": now}, {"$unset": {"last_access_delete": ""}})
             log.warning("self delete failed: %s", e)
             return await answer_or_alert(cb, "Не удалось удалить доступ в панели. Попробуй позже.", True)
     except Exception as e:
+        await ctx.db.users.update_one({"tg_id": cb.from_user.id, "last_access_delete": now}, {"$unset": {"last_access_delete": ""}})
         log.warning("self delete failed: %s", e)
         return await answer_or_alert(cb, "Не удалось удалить доступ в панели. Попробуй позже.", True)
 

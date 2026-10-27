@@ -66,6 +66,7 @@ class Config:
 
     # WDTT REST API v2
     panel_base: str = ""
+    panel_api_url: str = ""
     panel_api_key: str = ""
     panel_username: str = ""
     panel_password: str = ""
@@ -127,6 +128,9 @@ def load_config(base_dir: str | None = None) -> Config:
     cfg.panel_base = _get(
         "PANEL_BASE", "BASE_URL", "https://127.0.0.1:2860/"
     ).rstrip("/")
+    parsed_base = urlparse(cfg.panel_base)
+    default_api = f"{parsed_base.scheme}://{parsed_base.netloc}/api"
+    cfg.panel_api_url = _get("PANEL_API_URL", "PANEL_API_URL", default_api).rstrip("/")
     cfg.panel_api_key = _get("PANEL_API_KEY", "PANEL_API_KEY")
     cfg.panel_username = _get("ADMIN_USERNAME", "ADMIN_USERNAME", "admin")
     cfg.panel_password = _get("ADMIN_PASSWORD", "ADMIN_PASSWORD")

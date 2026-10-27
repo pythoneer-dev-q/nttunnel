@@ -323,7 +323,8 @@ def normalize_user(raw: Any) -> dict:
     user = dict(raw)
     nested = user.get("user")
     if isinstance(nested, dict):
-        user = dict(nested)
+        user = {**user, **nested}
+        user.pop("user", None)
 
     used = user.get("traffic_used_bytes")
     if used is None:
@@ -400,8 +401,12 @@ class WdttClient:
         password: str = "",
         ssl_insecure: bool = True,
         timeout: int = 30,
+        api_url: str = "",
     ):
         self.base = (base_url or "").rstrip("/")
+        from urllib.parse import urlsplit
+        parsed = urlsplit(self.base)
+        self.api_base = (api_url or f"{parsed.scheme}://{parsed.netloc}/api").rstrip("/")
         self.api_key = (api_key or "").strip()
         self.username = username or ""
         self.password = password or ""
@@ -424,7 +429,7 @@ class WdttClient:
             return self._session
 
         connector: aiohttp.TCPConnector
-        if self.base.startswith("https"):
+        if self.api_base.startswith("https://"):
             ctx = ssl_mod.create_default_context()
             if self.ssl_insecure:
                 ctx.check_hostname = False
@@ -481,7 +486,7 @@ class WdttClient:
 
     async def _login(self) -> None:
         async with self._lock:
-            url = f"{self.base}/api/auth/token"
+            url = f"{self.api_base}/auth/token"
             payload = {"username": self.username, "password": self.password}
 
             async with self._session_ctx() as sess:
@@ -520,7 +525,7 @@ class WdttClient:
         _retried: bool = False,
     ) -> Any:
         await self._ensure_token()
-        url = f"{self.base}/api{path}"
+        url = f"{self.api_base}{path}"
         headers = self._auth_headers()
 
         async with self._session_ctx() as sess:

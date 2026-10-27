@@ -193,6 +193,7 @@ async def restart(request: web.Request):
 def make_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/api/auth/token", auth_token)
+    app.router.add_post("/custom/api/auth/token", auth_token)
     app.router.add_get("/api/users", users)
     app.router.add_post("/api/users", create_user)
     app.router.add_get("/api/users/{user_id}", get_user)
@@ -204,6 +205,7 @@ def make_app() -> web.Application:
     app.router.add_post("/api/nodes/{node_id}/ping", ping_node)
     app.router.add_delete("/api/nodes/{node_id}", delete_node)
     app.router.add_get("/api/status", status)
+    app.router.add_get("/custom/api/status", status)
     app.router.add_post("/api/system/restart", restart)
     return app
 
@@ -219,6 +221,13 @@ async def main():
     await site.start()
     port = runner.addresses[0][1]
     base = f"http://127.0.0.1:{port}"
+    assert WdttClient(base + "/wdtt").api_base == base + "/api"
+    assert WdttClient(base, api_url=base + "/custom/api/").api_base == base + "/custom/api"
+
+    custom = WdttClient(base + "/wdtt", api_url=base + "/custom/api", username="root", password="pw")
+    assert (await custom.status())["version"] == "2.0"
+    await custom.close()
+    state["logins"] = 0
 
     # ------------------------------------------------ 1. API-key режим
     client = WdttClient(base, api_key=API_KEY, timeout=10)

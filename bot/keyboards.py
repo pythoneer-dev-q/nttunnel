@@ -176,6 +176,7 @@ def access_kb(
         btn("🔄 Обновить", "u:access"),
         btn("↩️ В меню", "u:menu"),
     ])
+    rows.insert(-1, [btn("📱 Устройства", "u:devices")])
     return markup(*rows)
 
 

@@ -52,6 +52,7 @@ async def main():
 
     wdtt = WdttClient(
         base_url=config.panel_base,
+        api_url=config.panel_api_url,
         api_key=config.panel_api_key,
         username=config.panel_username,
         password=config.panel_password,

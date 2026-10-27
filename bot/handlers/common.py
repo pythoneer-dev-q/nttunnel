@@ -11,7 +11,7 @@ from aiogram.types import CallbackQuery, Message
 
 from ..context import app
 from ..db import utcnow
-from ..keyboards import apps_kb, menu_back_kb, menu_kb, referral_kb
+from ..keyboards import apps_kb, menu_back_kb, menu_kb, referral_kb, markup, btn
 from ..services import refresh_snapshot, snapshot_is_fresh
 from ..texts import esc, help_text, menu_text
 from ..utils import answer_or_alert, safe_edit
@@ -75,7 +75,37 @@ async def cmd_start(
         user_doc.update(patch)
         await ctx.db.log_event(tg_id, "start_payload", payload)
 
+    if not user_doc.get("onboarding_done") and not user_doc.get("registered"):
+        await message.answer(
+            "👋 <b>Добро пожаловать!</b>\n\n"
+            "Здесь можно создать доступ, подключить устройство и следить за расходом трафика.\n\n"
+            "Сначала создадим доступ, затем выберем приложение и добавим в него ссылку. "
+            "Настройки и инструкции всегда доступны в меню.",
+            reply_markup=markup([btn("Далее →", "u:intro:2")], [btn("Пропустить", "u:intro:done")]),
+        )
+        return
     await show_menu(message, user_doc, edit=False)
+
+
+@router.callback_query(F.data == "u:intro:2")
+async def cb_intro_second(cb: CallbackQuery):
+    if cb.message:
+        await safe_edit(cb.message,
+            "🔑 <b>Как начать</b>\n\n"
+            "1. Нажми «Создать доступ» и ознакомься с условиями.\n"
+            "2. Установи приложение из раздела «Инструкция».\n"
+            "3. Скопируй ссылку из раздела «Мой доступ» и добавь её в приложение.\n\n"
+            "В меню можно проверить трафик, устройства и обратиться в поддержку.",
+            markup([btn("Открыть меню", "u:intro:done")]))
+    await answer_or_alert(cb)
+
+
+@router.callback_query(F.data == "u:intro:done")
+async def cb_intro_done(cb: CallbackQuery, user: dict | None = None):
+    await app().db.users.update_one({"tg_id": cb.from_user.id}, {"$set": {"onboarding_done": True}})
+    if cb.message:
+        await show_menu(cb.message, user or {}, edit=True)
+    await answer_or_alert(cb)
 
 
 @router.message(Command("menu"))

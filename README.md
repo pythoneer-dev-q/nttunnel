@@ -63,7 +63,8 @@ python run.py             # или: python bot/main.py
 | `ADMINS` | ID админов через запятую | — |
 | `MONGO_URI` | строка подключения MongoDB | `mongodb://localhost:27017` |
 | `MONGO_DB` | имя базы | `nttunnel` |
-| `PANEL_BASE` | базовый URL панели, клиент сам добавляет `/api` | `https://127.0.0.1:2860` |
+| `PANEL_BASE` | адрес панели для прочих настроек | `https://127.0.0.1:2860` |
+| `PANEL_API_URL` | полный адрес REST API | `https://127.0.0.1:2860/api` |
 | `PANEL_API_KEY` | ключ `X-API-Key` (рекомендуется) | — |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | fallback-логин для JWT | `admin` / — |
 | `PANEL_TIMEOUT` | таймаут запросов к панели, сек | `30` |
@@ -77,9 +78,9 @@ python run.py             # или: python bot/main.py
 | `NODES_COPY_LIMIT` | сколько нод показывать кнопками копирования | `5` |
 | `REFERRAL_BONUS_GB` | бонус пригласившему, ГБ (0 = выкл.) | `5` |
 
-`PANEL_BASE` указывается **без** `/api`. Если панель смонтирована под
-префиксом, укажи его в базе: `https://host:2860/wdtt` → клиент обратится к
-`/wdtt/api/users`.
+`PANEL_API_URL` задаёт точный адрес API, например `https://host/api`. Если
+он не задан, используется `/api` от домена `PANEL_BASE`, независимо от его пути.
+Если сервер действительно использует другой путь, укажи его в `PANEL_API_URL`.
 
 Приоритет источников: переменные окружения → `.env` → `creds.txt`
 (legacy-файл, не коммитится).
