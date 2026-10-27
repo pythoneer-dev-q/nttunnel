@@ -251,10 +251,6 @@ def profile_text(user: dict) -> str:
         f"Приглашено: <b>{int(user.get('referrals') or 0)}</b>",
     ]
 
-    if user.get("registered"):
-        data = _snapshot(user)
-        if data.get("total_gb") or data.get("traffic_used_bytes"):
-            lines += ["", traffic_line(data)]
 
     return "\n".join(lines)
 
