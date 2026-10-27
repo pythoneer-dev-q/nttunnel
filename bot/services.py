@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from urllib.parse import quote, urlsplit
 
 from .context import app
 from .wdtt import (
@@ -22,6 +23,26 @@ SNAPSHOT_TTL_SEC = 60
 
 # Публичный алиас: им пользуются хендлеры и тесты.
 as_int = to_int
+
+
+def public_subscription_url(live: dict, user: dict, base: str, path: str) -> str:
+    """Build the public subscription URL from configured base and panel sub ID."""
+    raw = subscription_url(live) or subscription_url(user)
+    if not base:
+        return raw
+    sub_id = str(live.get("sub_id") or user.get("sub_id") or "").strip()
+    if not sub_id and raw:
+        parts = urlsplit(raw).path.rstrip("/").split("/")
+        if len(parts) >= 3:
+            from urllib.parse import unquote
+            sub_id = unquote(parts[-1])
+    if not sub_id:
+        return ""
+    base = base.rstrip("/")
+    path = path.strip("/")
+    if path and not urlsplit(base).path.rstrip("/").endswith("/" + path):
+        base += "/" + path
+    return base + "/" + quote(sub_id, safe="")
 
 
 def _now() -> datetime:

@@ -140,15 +140,11 @@ def access_kb(
     shown: int = 5,
     total_nodes: int | None = None,
 ) -> InlineKeyboardMarkup:
-    """Кнопки копирования нод + подписка.
-
-    ``links`` — список ``{"name", "link"}``. Первые ``shown`` ссылок
-    копируются кнопками, остальные доступны в подписке.
-    """
+    """Открытие подписки, управление устройствами и навигация."""
     rows: list[list[InlineKeyboardButton]] = []
 
     if sub_url:
-        rows.append([copy_btn("📋 Скопировать подписку", sub_url, cb="u:sub")])
+        rows.append([btn("🌐 Открыть подписку", url=sub_url, style="primary")])
 
     rows.append([
         btn("🔄 Обновить", "u:access"),

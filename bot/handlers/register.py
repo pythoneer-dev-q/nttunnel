@@ -27,6 +27,7 @@ from ..services import (
     fetch_live,
     node_limit,
     refresh_snapshot,
+    public_subscription_url,
     _by_tg,
 )
 from ..texts import (
@@ -108,7 +109,9 @@ async def render_access(
     shown = node_limit(settings)
     nodes = await _nodes()
     links = access_links(live, nodes, settings.get("include_main_node", False))
-    sub_url = live.get("subscription_url") or user.get("subscription_url") or ""
+    cfg = app().cfg
+    sub_url = public_subscription_url(live, user, cfg.sub_url, cfg.sub_path)
+    live = {**live, "subscription_url": sub_url}
 
     text = access_text(user, live, links, shown)
     kb = access_kb(links, sub_url=sub_url, shown=shown, total_nodes=len(links))
@@ -151,7 +154,9 @@ async def cb_sub(cb: CallbackQuery, user: dict | None = None):
     shown = node_limit(settings)
     nodes = await _nodes()
     links = access_links(live, nodes, settings.get("include_main_node", False))
-    sub_url = live.get("subscription_url") or user.get("subscription_url") or ""
+    cfg = app().cfg
+    sub_url = public_subscription_url(live, user, cfg.sub_url, cfg.sub_path)
+    live = {**live, "subscription_url": sub_url}
 
     await cb.message.edit_text(
         sub_text(user, live, links),

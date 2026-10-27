@@ -117,14 +117,14 @@ def test_keyboards():
     ]
     assert "u:sec:faq" in data
 
-    # Единственная кнопка копирования ведёт на подписку.
-    copied = [
+    # Подписка открывается по URL, кнопок копирования нод нет.
+    buttons = [
         b
         for row in access_kb(links, "https://sub", 5, 7).inline_keyboard
         for b in row
-        if b.copy_text
     ]
-    assert len(copied) == 1 and copied[0].copy_text.text == "https://sub"
+    assert any(b.url == "https://sub" for b in buttons)
+    assert not any(b.copy_text for b in buttons)
 
     labels = [
         b.text
@@ -185,8 +185,9 @@ def test_texts():
     sub = sub_text(user, live, links)
 
     assert "10.0 ГБ" not in menu and "175 ГБ" not in menu
-    assert "10.0 ГБ" in access and "https://sub.example" in access
-    assert "10.0 ГБ" in sub and "https://sub.example" in sub
+    assert "10.0 ГБ" in access and "<blockquote>" in access
+    assert "10.0 ГБ" in sub and "<blockquote>" in sub
+    assert "https://sub.example" not in access and "https://sub.example" not in sub
     print("texts OK")
 
 

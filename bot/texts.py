@@ -159,8 +159,6 @@ def access_text(
     links: list | None = None,
     shown: int = 5,
 ) -> str:
-    links = links or []
-    total_nodes = len(links)
     password = (
         live.get("password")
         or user.get("panel_password")
@@ -168,47 +166,24 @@ def access_text(
         or "—"
     )
 
-    lines = [
-        "📱 <b>Мой доступ</b>",
-        "",
+    data = [
         f"🔐 <code>{esc(password)}</code>",
         traffic_line(live),
         status_line(live),
     ]
-
-    sub_url = live.get("subscription_url") or user.get("subscription_url") or ""
-    if sub_url:
-        lines += ["", "📦 <b>Ссылка подписки</b>", f"<code>{esc(sub_url)}</code>"]
-    else:
-        lines += ["", "📦 Панель пока не предоставила ссылку подписки."]
-    lines += ["", "Добавь ссылку подписки в приложение и обновляй её при изменении серверов. "
-              "В разделе «Устройства» можно проверить привязки."]
-
-    return "\n".join(lines)
+    return "📱 <b>Мой доступ</b>\n\n" + quote("\n".join(data))
 
 
 def sub_text(user: dict, live: dict, links: list | None = None) -> str:
-    sub_url = live.get("subscription_url") or user.get("subscription_url") or ""
     sub_id = live.get("sub_id") or user.get("sub_id") or "—"
 
     lines = [
-        "📦 <b>Подписка</b>",
-        "",
         f"🆔 <code>{esc(sub_id)}</code>",
         traffic_line(live),
         status_line(live),
     ]
 
-    if links:
-        lines.append(f"🌍 Нод в подписке: <b>{len(links)}</b>")
-
-    if sub_url:
-        lines += ["", f"<code>{esc(sub_url)}</code>"]
-
-    lines += ["", "Добавь ссылку подписки в поддерживающее её приложение. "
-              "При изменении списка серверов обнови подписку в приложении."]
-
-    return "\n".join(lines)
+    return "📦 <b>Подписка</b>\n\n" + quote("\n".join(lines))
 
 
 def node_link_text(index: int, link: str, name: str = "") -> str:
@@ -291,7 +266,7 @@ def help_text() -> str:
     return (
         "🏳️ <b>Подключение</b>\n\n"
         "1. Установи приложение для своей платформы.\n"
-        "2. Открой «Мой доступ» и скопируй ссылку подписки.\n"
+        "2. Открой «Мой доступ» и нажми «Открыть подписку».\n"
         "3. Добавь подписку в приложение и подключись.\n\n"
         "Если приложение поддерживает подписки, добавь ссылку из раздела «Подписка»: "
         "так будет проще обновлять список серверов.\n\n"

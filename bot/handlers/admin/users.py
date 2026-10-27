@@ -250,7 +250,8 @@ async def profile_text(user_id: str):
     status, _key = user_status(user)
     password = user.get("password") or "—"
     comment = user.get("comment") or "—"
-    sub_url = user.get("subscription_url") or user.get("sub_url") or ""
+    from ...services import public_subscription_url
+    sub_url = public_subscription_url(user, {}, ctx.cfg.sub_url, ctx.cfg.sub_path)
     tg_id = panel_tg_id(user)
 
     settings = await ctx.db.get_settings()

@@ -18,6 +18,7 @@ os.environ.setdefault("ADMINS", "1")
 from aiohttp import web  # noqa: E402
 
 from bot.wdtt import WdttClient, WdttError, extract_node_links, node_online, panel_tg_id  # noqa: E402
+from bot.services import public_subscription_url  # noqa: E402
 
 API_KEY = "test-api-key"
 USER = {
@@ -211,6 +212,10 @@ def make_app() -> web.Application:
 
 
 async def main():
+    assert public_subscription_url({"sub_id": "abc", "subscription_url": "http://127.0.0.1:2096/sub/abc"}, {}, "https://public.example", "not-a-sub") == "https://public.example/not-a-sub/abc"
+    assert public_subscription_url({"subscription_url": "http://127.0.0.1:2096/sub/abc"}, {}, "https://public.example/not-a-sub", "not-a-sub") == "https://public.example/not-a-sub/abc"
+    assert public_subscription_url({}, {}, "https://public.example", "sub") == ""
+    assert public_subscription_url({"subscription_url": "https://panel.example/sub/abc"}, {}, "", "") == "https://panel.example/sub/abc"
     assert not node_online({"enabled": True, "status": "offline"})
     assert not node_online({"enabled": True})
     assert panel_tg_id({"name": "tg_1234"}) != 123
