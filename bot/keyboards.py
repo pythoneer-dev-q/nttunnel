@@ -123,6 +123,7 @@ def no_config_kb() -> InlineKeyboardMarkup:
 def panel_down_kb() -> InlineKeyboardMarkup:
     return markup(
         [btn("🔄 Повторить", "u:access", style="primary")],
+        [btn("♻️ Пересоздать доступ", "u:recreate", style="success")],
         [btn("↩️ В меню", "u:menu")],
     )
 

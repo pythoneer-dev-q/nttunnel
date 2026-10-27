@@ -11,7 +11,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from ..context import app
-from ..keyboards import back_menu_kb, support_kb
+from ..keyboards import back_menu_kb, support_kb, markup, btn
 from ..texts import esc
 from ..utils import answer_or_alert, safe_edit
 
@@ -84,17 +84,34 @@ async def h_ticket_body(message: Message, state: FSMContext):
 
     data = await state.get_data()
     subject = data.get("subject", "")
+    ctx = app()
+    try:
+        tid = await ctx.db.create_ticket(message.from_user.id, subject, body)
+    except Exception:
+        log.exception("ticket creation failed")
+        return await message.answer("Не удалось сохранить обращение. Попробуй отправить текст ещё раз.", reply_markup=back_menu_kb())
     await state.clear()
 
-    tid = await app().db.create_ticket(
-        message.from_user.id, subject, body
-    )
+    delivered = 0
+    for admin_id in set(ctx.cfg.admin_ids):
+        try:
+            await message.bot.send_message(
+                admin_id,
+                f"🎫 <b>Новое обращение</b> <code>{esc(tid)}</code>\n"
+                f"От: <code>{message.from_user.id}</code>\n"
+                f"Тема: <b>{esc(subject)}</b>\n\n"
+                f"<blockquote>{esc(body)}</blockquote>",
+                reply_markup=markup([btn("Открыть обращение", f"adm:tkt:v{tid}")]),
+            )
+            delivered += 1
+        except Exception:
+            log.warning("ticket notification failed for admin %s", admin_id, exc_info=True)
 
     await message.answer(
         f"✅ <b>Обращение создано</b>\n\n"
         f"Номер: <code>{tid}</code>\n"
         f"Тема: {esc(subject)}\n\n"
-        "Ответ придёт сюда.",
+        + ("Ответ придёт сюда." if delivered else "Обращение сохранено в панели поддержки. Уведомить администратора сейчас не удалось."),
         reply_markup=back_menu_kb(),
     )
 

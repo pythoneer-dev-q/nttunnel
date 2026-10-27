@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 import hashlib
+import asyncio
 from datetime import timedelta
 
 from aiogram import F, Router
@@ -45,7 +46,7 @@ from ..texts import (
     sub_text,
     esc,
 )
-from ..utils import answer_or_alert, yes_no_kb, extract_vk_hash
+from ..utils import answer_or_alert, yes_no_kb, extract_vk_hash, safe_edit
 from ..wdtt import WdttError, online_flag
 
 log = logging.getLogger(__name__)
@@ -113,41 +114,36 @@ async def render_access(
     user = dict(user or {})
 
     if not user.get("registered"):
-        await cb.message.edit_text(no_config_text(), reply_markup=no_config_kb())
+        await safe_edit(cb.message, no_config_text(), no_config_kb())
         return
 
-    live, reason = await refresh_snapshot(user, force=force, timeout=12)
+    if fallback:
+        live, reason = fallback, "ok"
+    else:
+        live, reason = await refresh_snapshot(user, force=force, timeout=8)
 
     if live is None and fallback:
         live = fallback
     elif live is None:
         if reason == "panel_down":
-            await cb.message.edit_text(
+            await safe_edit(cb.message,
                 config_missing_text() if not user.get("panel_id")
                 else panel_down_text(),
-                reply_markup=panel_down_kb(),
+                panel_down_kb(),
             )
         elif reason in ("missing", "no_link"):
-            await cb.message.edit_text(
-                config_missing_text(), reply_markup=config_missing_kb()
-            )
+            await safe_edit(cb.message, config_missing_text(), config_missing_kb())
         else:
-            await cb.message.edit_text(
-                no_config_text(), reply_markup=no_config_kb()
-            )
+            await safe_edit(cb.message, no_config_text(), no_config_kb())
         return
 
-    settings = await app().db.get_settings()
-    shown = node_limit(settings)
-    nodes = await _nodes()
-    links = access_links(live, nodes, settings.get("include_main_node", False))
     cfg = app().cfg
     sub_url = public_subscription_url(live, user, cfg.sub_url, cfg.sub_path)
     live = {**live, "subscription_url": sub_url}
 
-    text = access_text(user, live, links, shown)
-    kb = access_kb(links, sub_url=sub_url, shown=shown, total_nodes=len(links))
-    await cb.message.edit_text(text, reply_markup=kb)
+    text = access_text(user, live)
+    kb = access_kb(sub_url=sub_url)
+    await safe_edit(cb.message, text, kb)
 
 
 @router.callback_query(F.data == "u:access")
@@ -155,8 +151,9 @@ async def cb_access(cb: CallbackQuery, user: dict | None = None):
     if not cb.message:
         return await answer_or_alert(cb)
 
-    await render_access(cb, user or {}, force=True)
     await answer_or_alert(cb)
+    await safe_edit(cb.message, "⏳ Проверяем доступ…")
+    await render_access(cb, user or {}, force=True)
 
 
 @router.callback_query(F.data == "u:sub")
@@ -169,32 +166,22 @@ async def cb_sub(cb: CallbackQuery, user: dict | None = None):
         await cb.message.edit_text(no_config_text(), reply_markup=no_config_kb())
         return await answer_or_alert(cb)
 
-    live, reason = await refresh_snapshot(user, force=True, timeout=12)
+    await answer_or_alert(cb)
+    await safe_edit(cb.message, "⏳ Проверяем подписку…")
+    live, reason = await refresh_snapshot(user, force=True, timeout=8)
 
     if live is None:
         if reason == "missing":
-            await cb.message.edit_text(
-                config_missing_text(), reply_markup=config_missing_kb()
-            )
+            await safe_edit(cb.message, config_missing_text(), config_missing_kb())
         else:
-            await cb.message.edit_text(
-                panel_down_text(), reply_markup=panel_down_kb()
-            )
-        return await answer_or_alert(cb)
+            await safe_edit(cb.message, panel_down_text(), panel_down_kb())
+        return
 
-    settings = await app().db.get_settings()
-    shown = node_limit(settings)
-    nodes = await _nodes()
-    links = access_links(live, nodes, settings.get("include_main_node", False))
     cfg = app().cfg
     sub_url = public_subscription_url(live, user, cfg.sub_url, cfg.sub_path)
     live = {**live, "subscription_url": sub_url}
 
-    await cb.message.edit_text(
-        sub_text(user, live, links),
-        reply_markup=sub_kb(sub_url, links, shown),
-    )
-    await answer_or_alert(cb)
+    await safe_edit(cb.message, sub_text(user, live), sub_kb(sub_url))
 
 
 @router.callback_query(F.data.startswith("u:show:"))
@@ -396,6 +383,9 @@ async def cb_create_with_hashes(cb: CallbackQuery, state: FSMContext, user: dict
     if not await ctx.db.claim_creating(tg_id, allow_recreate=recreate):
         return await answer_or_alert(cb, "Доступ уже создаётся", True)
 
+    await answer_or_alert(cb)
+    await safe_edit(cb.message, "⏳ Создаём доступ. Это может занять несколько секунд…")
+
     gb = int(settings.get("default_total_gb") or 0)
     devices = int(settings.get("default_max_devices") or 1)
     days = int(settings.get("default_expires_days") or 0)
@@ -405,22 +395,22 @@ async def cb_create_with_hashes(cb: CallbackQuery, state: FSMContext, user: dict
 
     try:
         try:
-            created = await ctx.wdtt.create_user(
+            created = await asyncio.wait_for(ctx.wdtt.create_user(
                 name=panel_name,
                 comment=f"tg{tg_id}",
                 total_gb=gb,
                 expires_at=expires_at,
                 max_devices=devices,
                 vk_hash=",".join(hashes),
-            )
+            ), timeout=15)
         except WdttError as e:
-            existing = await _find_existing(tg_id)
+            existing = await asyncio.wait_for(_find_existing(tg_id), timeout=8)
             if existing is None:
                 raise e
             panel_id = str(existing.get("id") or "")
             if not panel_id:
                 raise e
-            created = await ctx.wdtt.add_vk_hashes(panel_id, hashes)
+            created = await asyncio.wait_for(ctx.wdtt.add_vk_hashes(panel_id, hashes), timeout=15)
             created = {**existing, **created}
 
         panel_id = str(created.get("id") or panel_name)
@@ -478,7 +468,6 @@ async def cb_create_with_hashes(cb: CallbackQuery, state: FSMContext, user: dict
         fallback.setdefault("subscription_url", sub_url)
         fallback.setdefault("link", link)
         await render_access(cb, user_doc, force=True, fallback=fallback)
-        await answer_or_alert(cb, "✅ Доступ создан")
 
         inviter = _inviter(user_doc)
         if inviter and inviter != tg_id:
@@ -491,11 +480,10 @@ async def cb_create_with_hashes(cb: CallbackQuery, state: FSMContext, user: dict
 
         await cb.message.edit_text(
             "❌ <b>Не удалось создать доступ</b>\n\n"
-            f"<code>{str(e)[:250]}</code>\n\n"
+            f"<code>{esc(str(e)[:250] or 'Панель не ответила вовремя')}</code>\n\n"
             "Попробуй ещё раз через минуту.",
             reply_markup=no_config_kb(),
         )
-        await answer_or_alert(cb, "Ошибка создания", True)
 
 
 @router.callback_query(F.data == "u:devices")

@@ -193,6 +193,10 @@ async def main():
     await feed_cb("u:access", 7101)
     text = last_edit_text()
     assert "недоступна" in text.lower(), text
+    down_edit = next(c.args[1] for c in reversed(bot.session.call_args_list) if len(c.args) > 1 and type(c.args[1]).__name__ == "EditMessageText")
+    assert any(b.callback_data == "u:recreate" for row in down_edit.reply_markup.inline_keyboard for b in row)
+    await feed_cb("u:access", 7109)
+    assert "недоступна" in last_edit_text().lower()
 
     services.fetch_live = fake_missing
     await feed_cb("u:access", 7102)
@@ -241,6 +245,7 @@ async def main():
     await feed_hash("hash3,hash4,hash5", 7106)
     await feed_cb("u:hash:done", 7107)
     ctx.wdtt.create_user.assert_awaited_once()
+    ctx.wdtt.list_nodes.assert_not_awaited()
     assert ctx.wdtt.create_user.await_args.kwargs["vk_hash"] == "hash1,hash2"
     text = last_edit_text()
     assert "SECRET123" in text, text
@@ -248,6 +253,19 @@ async def main():
     doc = await db.get_user(TG2)
     assert doc and doc.get("registered") is True, doc
     assert doc.get("panel_id") == "tg_901999", doc
+
+    # Тикет сохраняется и отправляется каждому настроенному администратору.
+    cfg.admin_ids = [123456]
+    dp["admin_ids"] = cfg.admin_ids
+    await feed_cb("u:ticket:new", 7130)
+    await feed_hash("Проблема <тест>", 7131)
+    bot.session.reset_mock(side_effect=None)
+    await feed_hash("Ошибка <подключения>", 7132)
+    notifications = [c.args[1] for c in bot.session.call_args_list if len(c.args) > 1 and getattr(c.args[1], "chat_id", None) == 123456]
+    assert len(notifications) == 1 and "&lt;подключения&gt;" in notifications[0].text
+    assert notifications[0].reply_markup.inline_keyboard[0][0].callback_data.startswith("adm:tkt:v")
+    cfg.admin_ids = original_admins
+    dp["admin_ids"] = original_admins
 
     # Повтор после уже созданного пользователя добавляет хеши через API.
     from bot.wdtt import WdttError

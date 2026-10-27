@@ -48,8 +48,8 @@ async def cb_tickets_list(cb: CallbackQuery):
         return await answer_or_alert(cb)
     ctx = app()
     tickets = await ctx.db.list_tickets(limit=100)
-    chunk, pages, page = page_slice(
-        tickets, int(cb.data.removeprefix("adm:tkt:p") or 0), PAGE_SIZE)
+    page_num = int(cb.data.removeprefix("adm:tkt:p") or 0) if cb.data.startswith("adm:tkt:p") else 0
+    chunk, pages, page = page_slice(tickets, page_num, PAGE_SIZE)
     items = [(f"🎫 {t['ticket_id']} · {esc(t.get('subject', '')[:25])}",
               f"adm:tkt:v{t['ticket_id']}") for t in chunk]
     text = (f"🎫 <b>Обращения</b> — всего {len(tickets)}\n\n"
@@ -120,15 +120,20 @@ async def h_ticket_reply(message: Message, state: FSMContext):
     if t.get("status") == "open":
         await ctx.db.set_ticket_status(tid, "in_progress")
     # уведомляем юзера
+    delivered = False
     try:
         await message.bot.send_message(
             t["tg_id"],
             f"🛠 <b>Ответ в обращение</b> <code>{tid}</code>:\n\n"
-            f"{message.text[:2000]}",
+            f"{esc((message.text or '')[:2000])}",
         )
+        delivered = True
     except Exception as e:  # noqa: BLE001
         log.warning("notify user %s failed: %s", t["tg_id"], e)
-    await message.answer(f"✅ Ответ отправлен в тикет <code>{tid}</code>.")
+    await message.answer(
+        f"✅ Ответ отправлен пользователю в тикет <code>{esc(tid)}</code>." if delivered
+        else f"⚠️ Ответ сохранён в тикете <code>{esc(tid)}</code>, но доставить его пользователю не удалось."
+    )
 
 
 @router.callback_query(F.data.startswith("adm:tkt:close:"))
