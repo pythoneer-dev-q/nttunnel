@@ -325,14 +325,14 @@ def sub_text_legacy(
 
 
 def hash_intro(app_name: str = "WDTT") -> str:
-    return agree_text({})
+    return "🔗 Отправь хеш звонка VK или ссылку приглашения. Можно добавить до четырёх хешей."
 
 
 def hash_added_text(hashes: list | None = None, max_h: int = 4) -> str:
-    return "✅ VK-хеши больше не нужны — панель выдаёт готовую ссылку."
+    return f"✅ Добавлено VK-хешей: {len(hashes or [])}/{max_h}."
 
 
-HASH_HELP = "🔗 Ссылки выдаёт панель автоматически."
+HASH_HELP = "🔗 Отправь хеш или ссылку vk.com/call/join/… либо vk.ru/call/join/…."
 STEP_APP = "📱 Нажми «Продолжить», чтобы создать доступ."
 AGREEMENT_HEAD = "📜 <b>Соглашение</b>\n\n"
 

@@ -251,13 +251,8 @@ def extract_url(s: str) -> Optional[str]:
 # ------------------------------------------------------------------ VK hash
 
 
-VK_HASH_RE = re.compile(
-    r"/join[/:]\s*([A-Za-z0-9_-]+)",
-    re.IGNORECASE,
-)
-
 VK_BARE_HASH_RE = re.compile(
-    r"^\s*([A-Za-z0-9_-]{6,64})\s*$",
+    r"^[A-Za-z0-9_-]{1,256}$",
 )
 
 
@@ -268,41 +263,26 @@ def extract_vk_hash(s: str) -> Optional[str]:
 
         https://vk.com/call/join/XXXXXXXXXX
         vk.com/call/join/XXXXXXXXXX
-        /join/XXXXXXXXXX
-        /join:XXXXXXXXXX
         XXXXXXXXXX
     """
 
     if not s:
         return None
 
+    from urllib.parse import urlsplit
+
     s = s.strip()
-
-    # Полная/частичная ссылка:
-    match = VK_HASH_RE.search(s)
-
-    if match:
-        value = match.group(1)
-
-        if 6 <= len(value) <= 64:
-            return value
-
+    if VK_BARE_HASH_RE.fullmatch(s):
+        return s
+    try:
+        parsed = urlsplit(s if "://" in s else "https://" + s)
+        port = parsed.port
+    except ValueError:
         return None
-
-    # Голый хеш.
-    # Не принимаем строки, похожие на URL.
-    if (
-        "http" not in s.lower()
-        and "/" not in s
-        and "." not in s
-        and " " not in s
-    ):
-        match = VK_BARE_HASH_RE.fullmatch(s)
-
-        if match:
-            return match.group(1)
-
-    return None
+    if parsed.scheme.lower() not in ("http", "https") or parsed.hostname not in ("vk.com", "vk.ru") or parsed.username or parsed.password or port is not None:
+        return None
+    match = re.fullmatch(r"/call/(?:join/)?([A-Za-z0-9_-]{1,256})/?", parsed.path, re.IGNORECASE)
+    return match.group(1) if match else None
 
 
 # ------------------------------------------------------------------ TTL cache

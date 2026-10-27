@@ -18,6 +18,13 @@ def test_config():
 
 
 def test_helpers():
+    from bot.utils import extract_vk_hash
+    assert extract_vk_hash("hash1") == "hash1"
+    assert extract_vk_hash("https://vk.com/call/join/hash_2?x=1") == "hash_2"
+    assert extract_vk_hash("vk.ru/call/join/hash-3") == "hash-3"
+    assert extract_vk_hash("https://evil.example/call/join/hash1") is None
+    assert extract_vk_hash("https://vk.com.evil.example/call/join/hash1") is None
+    assert extract_vk_hash("https://vk.com:bad/call/join/hash1") is None
     from bot.wdtt import (
         expires_text,
         extract_node_links,

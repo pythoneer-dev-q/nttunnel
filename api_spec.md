@@ -1,18 +1,13 @@
 # WDTT RESTful API v2 (Remnawave-style)
 
-Полное руководство по программному управлению панелью WDTT. API спроектирован
-по аналогии с Remnawave / Marzban: поддерживает аутентификацию по токенам и
-API-ключам, не требует cookies/CSRF, обеспечивает гибкий поиск, управление
-статусами, лимитами трафика и сроками действия, а также работу с кластерными
-нодами.
+Полное руководство по программному управлению панелью WDTT. API спроектирован по аналогии с Remnawave / Marzban: поддерживает аутентификацию по токенам и API-ключам, не требует cookies/CSRF, обеспечивает гибкий поиск, управление статусами, лимитами трафика и сроками действия, а также работу с кластерными нодами.
 
 ---
 
 ## 1. Базовый URL и маршрутизация
 
 Панель доступна по порту `:2860` (или настроенному в панели).
-Эндпоинты REST API зарегистрированы как в корневом пути `/api/`, так и с учётом
-базового пути панели `/wdtt/api/`:
+Эндпоинты REST API зарегистрированы как в корневом пути `/api/`, так и с учётом базового пути панели `/wdtt/api/`:
 
 - `https://<SERVER_HOST>:2860/api/...`
 - `https://<SERVER_HOST>:2860/wdtt/api/...`
@@ -21,45 +16,43 @@ API-ключам, не требует cookies/CSRF, обеспечивает г�
 
 ## 2. Аутентификация
 
-API поддерживает **два независимых метода** передачи учётных данных в HTTP-заголовках.
+API поддерживает **два независимых метода** передачи учётных данных в HTTP-заголовках:
 
-### Вариант А: статический API-ключ администратора (рекомендуется для ботов)
-
+### Вариант А: Статический API-ключ администратора (Рекомендуется для ботов и скриптов)
+Передаётся в заголовке `X-API-Key` при каждом запросе:
 ```http
 X-API-Key: YOUR_ADMIN_API_KEY
 ```
-
-Ключ генерируется автоматически при первом запуске (24 байта hex) и отображается
-в веб-интерфейсе панели в окне **«REST API»** либо хранится в конфигурации
-`/etc/wdtt/panel.db` (`panel_config.api_key`).
+> **Где взять ключ?** Ключ генерируется автоматически при первом запуске (24 байта hex) и отображается в веб-интерфейсе панели во всплывающем окне **«REST API»** или в файле конфигурации `/etc/wdtt/panel.db` (`panel_config.api_key`).
 
 ### Вариант Б: JWT / Bearer Token
-
+Передаётся в заголовке `Authorization`:
 ```http
 Authorization: Bearer YOUR_AUTH_TOKEN
 ```
+Токен получается через эндпоинт `POST /api/auth/token` по логину и паролю администратора.
 
-Токен получается через `POST /api/auth/token` по логину и паролю администратора.
-
-> CSRF-токены не требуются: при наличии `X-API-Key` или `Authorization: Bearer …`
-> валидация CSRF и проверка сессионных cookies отключаются.
+> ℹ️ **CSRF-токены не требуются:** При наличии заголовков `X-API-Key` или `Authorization: Bearer ...` валидация CSRF и проверка сессионных cookies автоматически отключаются.
 
 ---
 
 ## 3. Формат ответов
 
-### Успех (HTTP 200 / 201)
+Фактические REST-ответы панели содержат поля на верхнем уровне (например,
+`user`, `users`, `total`), а не обязательно внутри `data`. Примеры ниже с
+`data` относятся к устаревшему формату; для текущего API используйте
+`response.user` или `response.users`. Ошибка содержит `success: false` и `error`.
 
+### Успешный ответ (HTTP 200 / 201)
 ```json
 {
   "success": true,
-  "data": { },
+  "data": { ... },
   "message": "success"
 }
 ```
 
-### Ошибка (HTTP 400 / 401 / 404 / 500)
-
+### Ответ при ошибке (HTTP 400 / 401 / 404 / 500)
 ```json
 {
   "success": false,
@@ -70,12 +63,11 @@ Authorization: Bearer YOUR_AUTH_TOKEN
 
 ---
 
-## 4. Эндпоинты
+## 4. Спецификация эндпоинтов
 
 ### 4.1. Аутентификация
 
 #### Получить токен
-
 ```http
 POST /api/auth/token
 Content-Type: application/json
@@ -85,9 +77,7 @@ Content-Type: application/json
   "password": "YOUR_ADMIN_PASSWORD"
 }
 ```
-
 **Ответ:**
-
 ```json
 {
   "success": true,
@@ -100,7 +90,6 @@ Content-Type: application/json
 ```
 
 #### Проверить текущий токен / права
-
 ```http
 GET /api/auth/me
 Authorization: Bearer <TOKEN>
@@ -110,27 +99,24 @@ Authorization: Bearer <TOKEN>
 
 ### 4.2. Управление пользователями
 
-#### Список пользователей (поиск и фильтры)
-
+#### Список пользователей (с поиском и фильтрами)
 ```http
 GET /api/users?q={search}&status={status}&limit={limit}&offset={offset}
 X-API-Key: <API_KEY>
 ```
 
-**Query-параметры:**
-
-- `q` *(строка, опционально)* — поиск по `name`, комментарию или паролю;
+**Параметры запроса (Query Params):**
+- `q` *(строка, опционально)* — поиск по имени (`name`), комментарию или паролю.
 - `status` *(строка, опционально)*:
-  - `all` — все (по умолчанию);
+  - `all` — все пользователи (по умолчанию);
   - `active` — только активные;
-  - `blocked` — деактивированные администратором;
-  - `expired` — с истёкшим сроком;
-  - `exceeded` — превысившие лимит трафика;
-- `limit` *(число, опционально)* — размер страницы (по умолчанию `50`);
+  - `blocked` — только деактивированные администратором;
+  - `expired` — с истёкшим сроком действия;
+  - `exceeded` — превысившие лимит трафика.
+- `limit` *(число, опционально)* — ограничение количества записей (по умолчанию `50`).
 - `offset` *(число, опционально)* — смещение для пагинации.
 
 **Пример ответа:**
-
 ```json
 {
   "success": true,
@@ -164,8 +150,9 @@ X-API-Key: <API_KEY>
 }
 ```
 
-#### Создать пользователя
+---
 
+#### Создать пользователя
 ```http
 POST /api/users
 Content-Type: application/json
@@ -183,15 +170,13 @@ X-API-Key: <API_KEY>
 }
 ```
 
-**Правила лимитов (non-blocking):**
-
-- `total_gb: 0` или опущено — безлимитный трафик;
-- `expires_at: 0` или опущено — бессрочный доступ;
-- `password` — если опущен, генерируется криптостойкий пароль;
+**Правила лимитов (Non-blocking):**
+- `total_gb: 0` или опущено — **безлимитный трафик**;
+- `expires_at: 0` или опущено — **бессрочный доступ**;
+- `password` — если опущен, генерируется случайный криптостойкий пароль;
 - `name` — если опущен, используется сгенерированный пароль.
 
 **Пример ответа:**
-
 ```json
 {
   "success": true,
@@ -204,18 +189,18 @@ X-API-Key: <API_KEY>
 }
 ```
 
-#### Детальная информация о пользователе
+---
 
+#### Детальная информация о пользователе
 ```http
 GET /api/users/{id}
 X-API-Key: <API_KEY>
 ```
+Возвращает полную карточку пользователя, статистику, список привязанных устройств и конфигурации подключения для каждой активной ноды кластера.
 
-Возвращает полную карточку пользователя, статистику, список привязанных
-устройств и конфигурации подключения для каждой активной ноды кластера.
+---
 
 #### Обновить пользователя
-
 ```http
 PUT /api/users/{id}
 Content-Type: application/json
@@ -232,75 +217,116 @@ X-API-Key: <API_KEY>
 }
 ```
 
+#### VK-хеши пользователя
+
+Хеши хранятся отдельно для каждого пользователя в поле `vk_hash`. Их можно
+указать при создании пользователя (`POST /api/users`) или заменить списком
+через `PATCH /api/users/{id}`:
+
+```bash
+curl -X PATCH "$BASE/api/users/$USER_ID" \
+  -H "X-API-Key: $API_KEY" -H 'Content-Type: application/json' \
+  -d '{"vk_hash":"hash1,https://vk.ru/call/join/hash2"}'
+```
+
+Чтобы **добавить** хеши, не перезаписывая уже сохранённые, используйте
+`POST /api/users/{id}/vk-hashes`. Поддерживаются строка `vk_hash` и массив
+строк `hashes` — можно передать оба поля:
+
+```bash
+curl -X POST "$BASE/api/users/$USER_ID/vk-hashes" \
+  -H "X-API-Key: $API_KEY" -H 'Content-Type: application/json' \
+  -d '{"hashes":["hash3","https://vk.com/call/join/hash4"]}'
+```
+
+В ответе HTTP 200 возвращается актуальная карточка на верхнем уровне:
+`{"success":true,"message":"VK hashes updated","user":{"vk_hash":"hash1,hash2,hash3,hash4",...}}`.
+`GET /api/users/{id}` также возвращает `user.vk_hash`, ссылки нод и `sub_url`.
+`{id}` — пароль пользователя (`password_key`) или его `sub_id`.
+
+Принимаются bare-хеши и ссылки приглашения VK; повторы удаляются, порядок
+сохраняется. Максимум — **4 уникальных хеша** на пользователя. Добавление
+пятого или пустой/некорректный запрос возвращает HTTP 400 без изменений.
+После обновления получите новые ссылки из карточки или обновите подписку в
+клиенте: ранее скопированные ссылки сами не изменятся.
+
+---
+
 #### Активировать пользователя
-
-Мгновенно разблокирует доступ к VPN.
-
+Мгновенно разблокирует доступ пользователя к VPN.
 ```http
 POST /api/users/{id}/activate
 X-API-Key: <API_KEY>
 ```
-
+**Ответ:**
 ```json
-{ "success": true, "message": "user activated" }
-```
-
-#### Заблокировать пользователя
-
-Мгновенно прерывает активные сессии и запрещает подключение к нодам.
-
-```http
-POST /api/users/{id}/block
-X-API-Key: <API_KEY>
-```
-
-```json
-{ "success": true, "message": "user blocked" }
-```
-
-#### Сбросить трафик
-
-Обнуляет накопленные `UpBytes`/`DownBytes`. Если пользователь был заблокирован
-из-за исчерпания лимита, доступ восстанавливается.
-
-```http
-POST /api/users/{id}/reset-traffic
-X-API-Key: <API_KEY>
-```
-
-```json
-{ "success": true, "message": "traffic counters reset to 0" }
-```
-
-#### Удалить пользователя
-
-Безвозвратно удаляет пользователя из памяти демона WDTT, MongoDB и SQLite.
-
-```http
-DELETE /api/users/{id}
-X-API-Key: <API_KEY>
-```
-
-```json
-{ "success": true, "message": "user deleted" }
+{
+  "success": true,
+  "message": "user activated"
+}
 ```
 
 ---
 
-### 4.3. Кластерные ноды (multi-server)
+#### Заблокировать пользователя
+Мгновенно прерывает активные сессии и запрещает подключение к нодам.
+```http
+POST /api/users/{id}/block
+X-API-Key: <API_KEY>
+```
+**Ответ:**
+```json
+{
+  "success": true,
+  "message": "user blocked"
+}
+```
 
-Позволяет подключать внешние VPS к панели и выдавать пользователям ссылки на
-все сервера сразу.
+---
+
+#### Сбросить трафик
+Обнуляет накопленные счётчики `UpBytes` и `DownBytes`. Если пользователь был заблокирован из-за исчерпания лимита, доступ восстанавливается.
+```http
+POST /api/users/{id}/reset-traffic
+X-API-Key: <API_KEY>
+```
+**Ответ:**
+```json
+{
+  "success": true,
+  "message": "traffic counters reset to 0"
+}
+```
+
+---
+
+#### Удалить пользователя
+Безвозвратно удаляет пользователя из памяти демона WDTT, MongoDB и SQLite.
+```http
+DELETE /api/users/{id}
+X-API-Key: <API_KEY>
+```
+**Ответ:**
+```json
+{
+  "success": true,
+  "message": "user deleted"
+}
+```
+
+---
+
+### 4.3. Кластерные ноды (Multi-Server)
+
+Позволяет подключать внешние VPS-серверы к панели и выдавать пользователям ссылки на все сервера сразу.
 
 #### Список нод
-
 ```http
 GET /api/nodes
 X-API-Key: <API_KEY>
 ```
 
 #### Добавить ноду
-
 ```http
 POST /api/nodes
 Content-Type: application/json
@@ -318,17 +344,13 @@ X-API-Key: <API_KEY>
 ```
 
 #### Проверить адрес ноды
-
 ```http
 POST /api/nodes/{id}/ping
 X-API-Key: <API_KEY>
 ```
-
-Ответ содержит `resolved` (проверка DNS/IP). Реальный статус `online`
-определяется heartbeat ноды.
+Ответ содержит `resolved` (проверка DNS/IP). Реальный статус `online` определяется heartbeat ноды.
 
 #### Удалить ноду
-
 ```http
 DELETE /api/nodes/{id}
 X-API-Key: <API_KEY>
@@ -339,17 +361,13 @@ X-API-Key: <API_KEY>
 ### 4.4. Системные эндпоинты
 
 #### Статус сервера
-
 ```http
 GET /api/status
 X-API-Key: <API_KEY>
 ```
-
-Возвращает версию WDTT, аптайм, потребление RAM, запущенные службы (DTLS, RAW
-UDP, Xray, MongoDB/SQLite) и общий трафик.
+Возвращает информацию о версии WDTT, аптайме, потребляемой памяти RAM, запущенных службах (DTLS, RAW UDP, Xray, MongoDB/SQLite) и общем трафике.
 
 #### Перезапуск службы
-
 ```http
 POST /api/system/restart
 X-API-Key: <API_KEY>
@@ -357,10 +375,9 @@ X-API-Key: <API_KEY>
 
 ---
 
-## 5. Примеры автоматизации
+## 5. Готовые примеры автоматизации
 
 ### Python (интеграция с Telegram-ботом)
-
 ```python
 import requests
 import time
@@ -368,7 +385,6 @@ import time
 BASE_URL = "http://127.0.0.1:2860/api"
 API_KEY = "YOUR_ADMIN_API_KEY"
 HEADERS = {"X-API-Key": API_KEY}
-
 
 def create_vpn_subscription(user_tg_id: int, days: int = 30, traffic_gb: int = 100):
     expires_at = int(time.time()) + (days * 86400)
@@ -378,7 +394,7 @@ def create_vpn_subscription(user_tg_id: int, days: int = 30, traffic_gb: int = 1
         "total_gb": traffic_gb,
         "expires_at": expires_at,
         "max_devices": 2,
-        "active": True,
+        "active": True
     }
     resp = requests.post(f"{BASE_URL}/users", json=payload, headers=HEADERS)
     resp.raise_for_status()
@@ -386,14 +402,12 @@ def create_vpn_subscription(user_tg_id: int, days: int = 30, traffic_gb: int = 1
     return {
         "sub_url": data["subscription_url"],
         "direct_link": data["link"],
-        "password": data["password"],
+        "password": data["password"]
     }
-
 
 def block_client(user_id: str):
     resp = requests.post(f"{BASE_URL}/users/{user_id}/block", headers=HEADERS)
     return resp.json().get("success", False)
-
 
 def unblock_client(user_id: str):
     resp = requests.post(f"{BASE_URL}/users/{user_id}/activate", headers=HEADERS)
@@ -401,7 +415,6 @@ def unblock_client(user_id: str):
 ```
 
 ### Bash / cURL
-
 ```bash
 # 1. Поиск клиентов с фильтром по статусу "active"
 curl -s -H "X-API-Key: $API_KEY" "$BASE/api/users?status=active" | jq .
@@ -420,7 +433,4 @@ curl -s -X DELETE -H "X-API-Key: $API_KEY" "$BASE/api/users/user_123"
 
 ## 6. Обратная совместимость с Legacy Web API
 
-Старые эндпоинты на основе cookies (`POST /login`, `GET /panel/api/users`,
-`POST /panel/api/users/add`) сохранены для совместимости со старыми версиями
-интерфейса и клиентами. Для новых интеграций рекомендуется использовать
-RESTful эндпоинты `/api/...`.
+Старые эндпоинты панели на основе cookies (`POST /login`, `GET /panel/api/users`, `POST /panel/api/users/add`) сохранены для совместимости со старыми версиями интерфейса и клиентами. Однако для новых интеграций рекомендуется использовать RESTful эндпоинты `/api/...`.

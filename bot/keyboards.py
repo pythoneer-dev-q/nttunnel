@@ -221,7 +221,7 @@ def hash_prompt_kb() -> InlineKeyboardMarkup:
 
 
 def hash_added_kb(hashes: list | None = None, max_h: int = 4) -> InlineKeyboardMarkup:
-    """Совместимость со старым флоу (VK-хеши больше не нужны)."""
+    """Совместимость со старым сценарием сбора хешей."""
     return markup(
         [btn("✅ Продолжить", "u:hash:done", style="success")],
         [btn("↩️ Отмена", "u:menu", style="danger")],

@@ -111,6 +111,7 @@ async def users(request: web.Request):
 
 async def create_user(request: web.Request):
     body = await request.json()
+    state["create_body"] = body
     state["methods"].append(("POST", "/api/users"))
     if not body.get("name"):
         return err("name required")
@@ -146,6 +147,10 @@ async def update_user(request: web.Request):
 async def action_user(request: web.Request):
     action = request.match_info["action"]
     state["methods"].append(("POST", f"/api/users/action/{action}"))
+    if action == "vk-hashes":
+        body = await request.json()
+        state["added_hashes"] = body["hashes"]
+        return web.json_response({"success": True, "user": {"id": request.match_info["user_id"], "vk_hash": ",".join(body["hashes"])}})
     return ok({}, message=f"user {action}")
 
 
@@ -271,9 +276,13 @@ async def main():
     assert len(state["methods"]) == calls_before, "user cache не работает"
 
     created = await client.create_user(
-        name="tg_77", comment="tg77", total_gb=50, max_devices=2
+        name="tg_77", comment="tg77", total_gb=50, max_devices=2,
+        vk_hash="hash1,hash2"
     )
     assert created["id"] == "tg_77" and created["password"] == "generated-pw"
+    assert state["create_body"]["vk_hash"] == "hash1,hash2"
+    updated = await client.add_vk_hashes("tg_42", ["hash1", "hash2"])
+    assert updated["vk_hash"] == "hash1,hash2" and state["added_hashes"] == ["hash1", "hash2"]
 
     await client.update_user("tg_42", total_gb=150)
     await client.block_user("tg_42")

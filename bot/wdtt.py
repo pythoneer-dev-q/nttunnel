@@ -669,6 +669,7 @@ class WdttClient:
         max_up_mbps: int = 0,
         active: bool = True,
         password: str = "",
+        vk_hash: str = "",
     ) -> dict:
         payload: dict[str, Any] = {
             "name": name,
@@ -683,6 +684,8 @@ class WdttClient:
             payload["comment"] = comment
         if password:
             payload["password"] = password
+        if vk_hash:
+            payload["vk_hash"] = vk_hash
 
         data = await self._request("POST", "/users", json=payload)
         result = normalize_user(data)
@@ -690,6 +693,11 @@ class WdttClient:
         result["id"] = user_id
         self._user_cache[user_id] = (time.time(), result)
         return result
+
+    async def add_vk_hashes(self, user_id: str, hashes: list[str]) -> dict:
+        data = await self._request("POST", f"/users/{user_id}/vk-hashes", json={"hashes": hashes})
+        self.invalidate_user(user_id)
+        return normalize_user(data)
 
     async def update_user(self, user_id: str, **fields: Any) -> dict:
         allowed = {

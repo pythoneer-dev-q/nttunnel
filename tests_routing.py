@@ -194,11 +194,37 @@ async def main():
 
     await feed_cb("u:agree", 7103)
     text = last_edit_text()
+    assert "VK-хеши" in text and not ctx.wdtt.create_user.called, text
+
+    tg_user = User(id=TG2, is_bot=False, first_name="R", username="regflow")
+    async def feed_hash(text, mid):
+        message = Message(message_id=mid, date=dt.now(), chat=Chat(id=TG2, type="private"), from_user=tg_user, text=text)
+        await dp.feed_update(bot, Update(update_id=mid, message=message))
+
+    await feed_hash("https://evil.example/call/join/hash1", 7104)
+    await feed_hash("hash1, https://vk.ru/call/join/hash2, hash1", 7105)
+    await feed_hash("hash3,hash4,hash5", 7106)
+    await feed_cb("u:hash:done", 7107)
+    ctx.wdtt.create_user.assert_awaited_once()
+    assert ctx.wdtt.create_user.await_args.kwargs["vk_hash"] == "hash1,hash2"
+    text = last_edit_text()
     assert "SECRET123" in text, text
 
     doc = await db.get_user(TG2)
     assert doc and doc.get("registered") is True, doc
     assert doc.get("panel_id") == "tg_901999", doc
+
+    # Повтор после уже созданного пользователя добавляет хеши через API.
+    from bot.wdtt import WdttError
+    await db.users.update_one({"tg_id": TG2}, {"$set": {"registered": False}, "$unset": {"panel_id": ""}})
+    ctx.wdtt.create_user = AsyncMock(side_effect=WdttError("already exists", status=400))
+    ctx.wdtt.list_users = AsyncMock(return_value={"users": [{"id": "existing-id", "name": f"tg_{TG2}"}]})
+    ctx.wdtt.add_vk_hashes = AsyncMock(return_value={"id": "existing-id", "vk_hash": "hash1"})
+    await feed_cb("u:agree", 7110)
+    await feed_hash("hash1", 7111)
+    await feed_cb("u:hash:done", 7112)
+    ctx.wdtt.add_vk_hashes.assert_awaited_once_with("existing-id", ["hash1"])
+    assert (await db.get_user(TG2))["registered"] is True
 
     services.fetch_live = orig_fetch
 

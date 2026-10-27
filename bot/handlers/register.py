@@ -7,7 +7,10 @@ import time
 from datetime import timedelta
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery
+from aiogram.filters import StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, Message
 
 from ..context import app
 from ..db import utcnow
@@ -41,11 +44,33 @@ from ..texts import (
     sub_text,
     esc,
 )
-from ..utils import answer_or_alert, yes_no_kb
+from ..utils import answer_or_alert, yes_no_kb, extract_vk_hash
 from ..wdtt import WdttError, online_flag
 
 log = logging.getLogger(__name__)
 router = Router(name="access")
+MAX_HASHES = 4
+
+
+class RegStates(StatesGroup):
+    hashes = State()
+
+
+def _hash_kb(hashes: list[str]):
+    rows = [[btn("✅ Создать доступ", "u:hash:done", style="success")]] if hashes else []
+    if hashes:
+        rows.append([btn("🗑 Очистить список", "u:hash:clear")])
+    rows.append([btn("↩️ Отмена", "u:menu")])
+    return markup(*rows)
+
+
+def _hash_text(hashes: list[str]) -> str:
+    return ("🔗 <b>VK-хеши звонков</b>\n\n"
+            "Отправь хеш или ссылку приглашения VK: например, "
+            "<code>https://vk.ru/call/join/...</code>. Можно отправить несколько "
+            "значений по одному или через запятую.\n\n"
+            f"Добавлено: <b>{len(hashes)}/{MAX_HASHES}</b>. "
+            "Нужен хотя бы один хеш. После этого нажми «Создать доступ».")
 
 
 async def _slots_ok() -> tuple[dict, bool]:
@@ -241,13 +266,59 @@ async def _find_existing(tg_id: int) -> dict | None:
 
 
 @router.callback_query(F.data.in_({"u:agree", "u:agree:r"}))
-async def cb_agree(cb: CallbackQuery, user: dict | None = None):
+async def cb_agree(cb: CallbackQuery, state: FSMContext, user: dict | None = None):
+    if not cb.message:
+        return await answer_or_alert(cb)
+    await state.clear()
+    await state.set_state(RegStates.hashes)
+    await state.update_data(hashes=[], recreate=cb.data == "u:agree:r")
+    await cb.message.edit_text(_hash_text([]), reply_markup=_hash_kb([]))
+    await answer_or_alert(cb)
+
+
+@router.message(StateFilter(RegStates.hashes), F.text)
+async def collect_hashes(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    if raw.startswith("/"):
+        return await message.answer("Отправь хеш или ссылку VK либо нажми «Отмена».")
+    parts = [part.strip() for part in raw.replace("\n", ",").split(",") if part.strip()]
+    try:
+        parsed = [extract_vk_hash(part) for part in parts]
+    except ValueError:
+        parsed = []
+    data = await state.get_data()
+    hashes = list(data.get("hashes") or [])
+    if not parsed or any(not item for item in parsed):
+        return await message.answer("Не удалось распознать хеш. Отправь хеш или ссылку vk.com/call/… либо vk.ru/call/…", reply_markup=_hash_kb(hashes))
+    for item in parsed:
+        if item not in hashes:
+            hashes.append(item)
+    if len(hashes) > MAX_HASHES:
+        return await message.answer("Можно добавить не более четырёх уникальных хешей.", reply_markup=_hash_kb(data.get("hashes") or []))
+    await state.update_data(hashes=hashes)
+    await message.answer(_hash_text(hashes), reply_markup=_hash_kb(hashes))
+
+
+@router.callback_query(StateFilter(RegStates.hashes), F.data == "u:hash:clear")
+async def clear_hashes(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(hashes=[])
+    if cb.message:
+        await cb.message.edit_text(_hash_text([]), reply_markup=_hash_kb([]))
+    await answer_or_alert(cb)
+
+
+@router.callback_query(StateFilter(RegStates.hashes), F.data == "u:hash:done")
+async def cb_create_with_hashes(cb: CallbackQuery, state: FSMContext, user: dict | None = None):
     if not cb.message:
         return await answer_or_alert(cb)
 
+    state_data = await state.get_data()
+    hashes = state_data.get("hashes") or []
+    if not 1 <= len(hashes) <= MAX_HASHES:
+        return await answer_or_alert(cb, "Добавь от одного до четырёх хешей", True)
     ctx = app()
     tg_id = cb.from_user.id
-    recreate = cb.data == "u:agree:r"
+    recreate = bool(state_data.get("recreate"))
     user_doc = dict(user or await ctx.db.get_user(tg_id) or {})
 
     if user_doc.get("registered") and not recreate:
@@ -275,12 +346,17 @@ async def cb_agree(cb: CallbackQuery, user: dict | None = None):
                 total_gb=gb,
                 expires_at=expires_at,
                 max_devices=devices,
+                vk_hash=",".join(hashes),
             )
         except WdttError as e:
             existing = await _find_existing(tg_id)
             if existing is None:
                 raise e
-            created = existing
+            panel_id = str(existing.get("id") or "")
+            if not panel_id:
+                raise e
+            created = await ctx.wdtt.add_vk_hashes(panel_id, hashes)
+            created = {**existing, **created}
 
         panel_id = str(created.get("id") or panel_name)
         password = str(created.get("password") or "")
@@ -313,6 +389,7 @@ async def cb_agree(cb: CallbackQuery, user: dict | None = None):
                     "sub_created_at": utcnow(),
                     "sub_total_gb": gb,
                     "sub_max_devices": devices,
+                    "sub_vk_hashes": hashes,
                     "panel_snapshot_at": utcnow(),
                     "referral_credited": False,
                 },
@@ -323,6 +400,7 @@ async def cb_agree(cb: CallbackQuery, user: dict | None = None):
         await ctx.db.log_event(
             tg_id, "access_created", f"gb={gb} dev={devices} days={days}"
         )
+        await state.clear()
 
         user_doc = await ctx.db.get_user(tg_id) or user_doc
         fallback = dict(created) if isinstance(created, dict) else {}
